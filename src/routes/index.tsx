@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
-import logo from "@/assets/lepdo-logo.asset.json";
+import lifestylelogo from "@/assets/lifestylelogo.jpeg";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -84,7 +84,7 @@ function Login({ onSuccess }: { onSuccess: () => void }) {
         <div className="rounded-3xl bg-card p-10 shadow-elegant border border-border/60">
           <div className="flex flex-col items-center text-center">
             <img
-              src={logo.url}
+              src={lifestylelogo}
               alt="LEPDO Lifestyle"
               className="h-24 w-24 rounded-2xl object-cover shadow-soft"
             />
@@ -276,8 +276,8 @@ function SidebarContent({
     <>
       <div className="p-6 flex items-center gap-3 border-b border-sidebar-border/50">
         <img
-          src={logo.url}
-          alt="LEPDO"
+          src={lifestylelogo}
+          alt="LEPDO Lifestyle"
           className="h-11 w-11 rounded-xl object-cover shadow-soft"
         />
         <div className="min-w-0">
