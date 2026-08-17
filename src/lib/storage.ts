@@ -16,6 +16,7 @@ export interface SavedPrice {
   originalPrice: number;
   discountPct: number;
   netProfit: number;
+  netMargin?: number;
 }
 
 export function loadSettings(): PricingSettings {
