@@ -361,6 +361,8 @@ interface CalcRow {
   priceMode: "auto" | "manual";
   manualPrice: number;
   sku: string;
+  skuAuto: string;
+  skuManual: boolean;
   discountPct: number;
   adsOn: boolean;
   adsPct: number;
@@ -373,6 +375,25 @@ interface CalcRow {
 const DISCOUNTS = [0, 10, 20, 30, 40, 50];
 const MARGIN_PRESETS = [5, 10, 15, 20];
 const ADS_PRESETS = [5, 10, 15, 20];
+
+function cleanSkuInput(value: string): string {
+  return value
+    .replace(/\s+/g, "-")
+    .replace(/[^a-zA-Z0-9-]+/g, "")
+    .replace(/-+/g, "-");
+}
+
+function cleanSkuSegment(value: string, uppercase = false): string {
+  const cleaned = cleanSkuInput(value).trim().replace(/^-+|-+$/g, "");
+  return uppercase ? cleaned.toUpperCase() : cleaned;
+}
+
+function generatedSku(baseSku: string, productName: string): string {
+  const base = cleanSkuSegment(baseSku);
+  if (!base) return "";
+  const suffix = cleanSkuSegment(productName, true);
+  return suffix ? `${base}-${suffix}` : base;
+}
 
 function Dual({
   value,
@@ -393,8 +414,7 @@ function Dual({
   );
 }
 
-function useRowCalc(row: CalcRow, settings: PricingSettings) {
-  return useMemo(() => {
+function calcRow(row: CalcRow, settings: PricingSettings) {
     const opts = { adsPct: row.adsOn ? row.adsPct : 0 };
     const rawBase = calculateSellingPrice(row.cost, settings, opts);
     const base = Number.isFinite(rawBase) ? roundPrice(rawBase) : 0;
@@ -424,7 +444,10 @@ function useRowCalc(row: CalcRow, settings: PricingSettings) {
     const bd = computeBreakdown(row.cost, selling, settings, opts);
     const original = compareAtPrice(selling, row.discountPct);
     return { base, marginAmount, auto, selling, bd, original, minApplied };
-  }, [row, settings]);
+}
+
+function useRowCalc(row: CalcRow, settings: PricingSettings) {
+  return useMemo(() => calcRow(row, settings), [row, settings]);
 }
 
 
@@ -438,6 +461,7 @@ function CalculatorView({
   const [input, setInput] = useState("");
   const [currency, setCurrency] = useState<"USD" | "INR">("USD");
   const [rows, setRows] = useState<CalcRow[]>([]);
+  const [mainSku, setMainSku] = useState("");
 
   // Global pre-calculate options — default 40% discount, 10% target margin
   const [discountMode, setDiscountMode] = useState<"none" | "preset" | "custom">("preset");
@@ -469,20 +493,25 @@ function CalculatorView({
   }, [marginMode, marginPreset, marginKind, marginCustom, marginCurrency, settings.usdInrRate]);
 
   function buildRows(parsed: { name: string; cost: number; note?: string }[]) {
-    const nextRows: CalcRow[] = parsed.map((p, i) => ({
-      id: `${Date.now()}-${i}`,
-      name: p.name,
-      cost: p.cost,
-      costNote: p.note,
-      priceMode: "auto",
-      manualPrice: 0,
-      sku: "",
-      discountPct,
-      adsOn: true,
-      adsPct: settings.adsSpend,
-      ...marginCfg,
-      expanded: false,
-    }));
+    const nextRows: CalcRow[] = parsed.map((p, i) => {
+      const sku = generatedSku(mainSku, p.name);
+      return {
+        id: `${Date.now()}-${i}`,
+        name: p.name,
+        cost: p.cost,
+        costNote: p.note,
+        priceMode: "auto",
+        manualPrice: 0,
+        sku,
+        skuAuto: sku,
+        skuManual: false,
+        discountPct,
+        adsOn: true,
+        adsPct: settings.adsSpend,
+        ...marginCfg,
+        expanded: false,
+      };
+    });
     setRows(nextRows);
     bumpCalcCount(nextRows.length);
     toast.success(`Calculated ${nextRows.length} item${nextRows.length > 1 ? "s" : ""}.`);
@@ -522,15 +551,44 @@ function CalculatorView({
   }
 
   function update(id: string, patch: Partial<CalcRow>) {
-    setRows((rs) => rs.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+    setRows((rs) =>
+      rs.map((r) => {
+        if (r.id !== id) return r;
+        const next = { ...r, ...patch };
+        if (Object.prototype.hasOwnProperty.call(patch, "sku")) {
+          next.skuManual = next.sku !== next.skuAuto;
+        }
+        return next;
+      })
+    );
+  }
+
+  function applyMainSku(value: string, force = false) {
+    setRows((rs) =>
+      rs.map((r) => {
+        if (!force && r.skuManual) return r;
+        const sku = generatedSku(value, r.name);
+        return { ...r, sku, skuAuto: sku, skuManual: false };
+      })
+    );
+  }
+
+  function handleMainSkuChange(value: string) {
+    const cleaned = cleanSkuInput(value);
+    setMainSku(cleaned);
+    applyMainSku(cleaned);
+  }
+
+  function generateSkus() {
+    if (!cleanSkuSegment(mainSku)) {
+      toast.error("Enter a Main SKU first.");
+      return;
+    }
+    applyMainSku(mainSku, true);
+    toast.success(`Generated SKUs for ${rows.length} item${rows.length > 1 ? "s" : ""}.`);
   }
 
   function saveRow(r: CalcRow, selling: number, original: number, netProfit: number, margin: number) {
-    if (!r.sku.trim()) {
-      toast.error("Open the row and enter a SKU before saving.");
-      update(r.id, { expanded: true });
-      return;
-    }
     addSaved({
       id: `${Date.now()}-${r.id}`,
       date: new Date().toISOString(),
@@ -544,7 +602,29 @@ function CalculatorView({
       netMargin: margin,
     });
     onSaved();
-    toast.success(`Saved ${r.sku}`);
+    toast.success(r.sku.trim() ? `Saved ${r.sku.trim()}` : `Saved ${r.name}`);
+  }
+
+  function saveAll() {
+    if (!rows.length) return;
+    const stamp = Date.now();
+    rows.forEach((r, i) => {
+      const { selling, original, bd } = calcRow(r, settings);
+      addSaved({
+        id: `${stamp}-${r.id}-${i}`,
+        date: new Date().toISOString(),
+        sku: r.sku.trim(),
+        productName: r.name,
+        cost: r.cost,
+        sellingPrice: selling,
+        originalPrice: original,
+        discountPct: r.discountPct,
+        netProfit: bd.netProfit,
+        netMargin: bd.netProfitPct,
+      });
+    });
+    onSaved();
+    toast.success(`Saved all ${rows.length} item${rows.length > 1 ? "s" : ""}.`);
   }
 
   const selectCls =
@@ -709,6 +789,46 @@ function CalculatorView({
 
       {rows.length > 0 && (
         <>
+          <Card className="shadow-soft border-border/60">
+            <CardContent className="p-4">
+              <div className="flex flex-col gap-4 lg:flex-row lg:items-end">
+                <div className="min-w-0 flex-1">
+                  <div className="mb-3 flex items-center justify-between gap-3">
+                    <h2 className="font-display text-xl">Results</h2>
+                    <Badge variant="secondary">{rows.length} items</Badge>
+                  </div>
+                  <Label htmlFor="main-sku">Main SKU / Base SKU</Label>
+                  <div className="mt-2 flex flex-col gap-2 sm:flex-row">
+                    <Input
+                      id="main-sku"
+                      value={mainSku}
+                      onChange={(e) => handleMainSkuChange(e.target.value)}
+                      placeholder="ring-55"
+                      autoComplete="off"
+                      spellCheck={false}
+                      className="h-10 font-mono"
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={generateSkus}
+                      className="h-10 shrink-0"
+                    >
+                      <RefreshCw className="h-4 w-4 mr-2" /> Generate SKUs
+                    </Button>
+                  </div>
+                </div>
+                <Button onClick={saveAll} className="h-10 lg:min-w-[150px]">
+                  <Save className="h-4 w-4 mr-2" /> Save All ({rows.length})
+                </Button>
+              </div>
+              <p className="mt-3 text-xs text-muted-foreground">
+                SKUs update instantly as Base SKU + product name. Manually edited row SKUs are
+                kept until Generate SKUs is clicked.
+              </p>
+            </CardContent>
+          </Card>
+
           {/* Mobile results */}
           <div className="space-y-3 md:hidden">
             {rows.map((r) => (
@@ -724,23 +844,21 @@ function CalculatorView({
 
           {/* Desktop results */}
           <Card className="shadow-soft border-border/60 overflow-hidden hidden md:block">
-            <CardHeader>
-              <CardTitle className="font-display text-xl">Results</CardTitle>
-            </CardHeader>
             <CardContent className="p-0">
               <div className="overflow-x-auto">
                 <Table className="text-sm">
                   <TableHeader>
                     <TableRow className="bg-secondary/40">
-                      <TableHead className="w-8" />
-                      <TableHead className="min-w-[150px]">Product</TableHead>
-                      <TableHead className="w-[110px] text-right">Cost</TableHead>
-                      <TableHead className="w-[120px] text-right">Selling</TableHead>
-                      <TableHead className="w-[104px]">Discount</TableHead>
-                      <TableHead className="w-[110px] text-right">Original</TableHead>
-                      <TableHead className="w-[110px] text-right">Net Profit</TableHead>
-                      <TableHead className="w-[74px] text-right">Margin</TableHead>
-                      <TableHead className="w-[88px] text-right">Save</TableHead>
+                      <TableHead className="w-7" />
+                      <TableHead className="min-w-[120px]">Product</TableHead>
+                      <TableHead className="w-[200px]">SKU</TableHead>
+                      <TableHead className="w-[95px] text-right">Cost</TableHead>
+                      <TableHead className="w-[100px] text-right">Selling</TableHead>
+                      <TableHead className="w-[80px]">Discount</TableHead>
+                      <TableHead className="w-[95px] text-right">Original</TableHead>
+                      <TableHead className="w-[95px] text-right">Net Profit</TableHead>
+                      <TableHead className="w-[52px] text-right">Margin</TableHead>
+                      <TableHead className="w-[56px] text-right">Save</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -945,12 +1063,12 @@ function RowControls({
       </div>
       <div className="sm:col-span-3">
         <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">
-          SKU
+          SKU (optional)
         </Label>
         <Input
           value={row.sku}
           onChange={(e) => update(row.id, { sku: e.target.value })}
-          placeholder="LP-XX-000"
+          placeholder="LP-RING-001"
           className="h-10 mt-1 max-w-xs"
         />
       </div>
@@ -1012,6 +1130,12 @@ function MobileResult({
           <DiscountSelect row={row} update={update} />
           <Badge variant="secondary">{bd.netProfitPct.toFixed(1)}% margin</Badge>
         </div>
+        <Input
+          value={row.sku}
+          onChange={(e) => update(row.id, { sku: e.target.value })}
+          placeholder="SKU (optional) — e.g. LP-RING-001"
+          className="h-10 text-sm"
+        />
         {row.expanded && (
           <div className="space-y-4 rounded-xl bg-secondary/30 p-4">
             <RowControls row={row} auto={auto} update={update} />
@@ -1080,6 +1204,14 @@ function RowItem({
             <div className="text-[11px] text-muted-foreground">{row.costNote}</div>
           )}
         </TableCell>
+        <TableCell className="align-middle">
+          <Input
+            value={row.sku}
+            onChange={(e) => update(row.id, { sku: e.target.value })}
+            placeholder="LP-RING-001"
+            className="h-9 w-[180px] px-2 font-mono text-[9px] md:text-[9px]"
+          />
+        </TableCell>
         <TableCell className="text-right">
           <Dual value={row.cost} className="ml-auto" />
         </TableCell>
@@ -1117,7 +1249,7 @@ function RowItem({
       </TableRow>
       {row.expanded && (
         <TableRow>
-          <TableCell colSpan={9} className="bg-secondary/30 p-6 space-y-6">
+          <TableCell colSpan={10} className="bg-secondary/30 p-6 space-y-6">
             <RowControls row={row} auto={auto} update={update} />
             <PriceBuildup
               minApplied={minApplied}
@@ -1623,6 +1755,50 @@ function SettingsView({
 
 /* ---------------- Saved ---------------- */
 
+/* ---------------- Saved: Main SKU accordion groups ---------------- */
+
+interface SavedGroup {
+  base: string; // Main SKU / Base SKU
+  rows: SavedPrice[];
+  latest: string; // ISO date of newest row
+}
+
+/** Derive the Main SKU by stripping the product suffix (e.g. "-10KT-LGD") from the row SKU. */
+function baseSkuOf(r: SavedPrice): string {
+  const sku = (r.sku || "").trim();
+  if (!sku) return r.productName || "(No SKU)";
+  const suffix = r.productName.trim().toUpperCase().replace(/\s+/g, "-");
+  if (suffix && sku.toUpperCase().endsWith(`-${suffix}`)) {
+    return sku.slice(0, sku.length - suffix.length - 1);
+  }
+  return sku;
+}
+
+function groupSaved(saved: SavedPrice[]): SavedGroup[] {
+  const map = new Map<string, SavedPrice[]>();
+  for (const r of saved) {
+    const base = baseSkuOf(r);
+    if (!map.has(base)) map.set(base, []);
+    map.get(base)!.push(r);
+  }
+  const groups: SavedGroup[] = [];
+  for (const [base, rows] of map) {
+    rows.sort((a, b) => a.productName.localeCompare(b.productName));
+    const latest = rows.reduce(
+      (m, r) => (r.date > m ? r.date : m),
+      rows[0]?.date ?? ""
+    );
+    groups.push({ base, rows, latest });
+  }
+  // newest group first
+  groups.sort((a, b) => (a.latest < b.latest ? 1 : -1));
+  return groups;
+}
+
+function marginOf(r: SavedPrice): number {
+  return r.netMargin ?? (r.sellingPrice > 0 ? (r.netProfit / r.sellingPrice) * 100 : 0);
+}
+
 function SavedView({
   saved,
   refresh,
@@ -1633,39 +1809,41 @@ function SavedView({
   settings: PricingSettings;
 }) {
   const [q, setQ] = useState("");
-  const [sortKey, setSortKey] = useState<keyof SavedPrice>("date");
-  const [asc, setAsc] = useState(false);
+  const [open, setOpen] = useState<Set<string>>(new Set());
   const [page, setPage] = useState(1);
   const PAGE = 10;
 
+  const groups = useMemo(() => groupSaved(saved), [saved]);
+
   const filtered = useMemo(() => {
-    let list = saved.filter(
-      (r) =>
-        r.sku.toLowerCase().includes(q.toLowerCase()) ||
-        r.productName.toLowerCase().includes(q.toLowerCase())
+    const needle = q.trim().toLowerCase();
+    if (!needle) return groups;
+    return groups.filter(
+      (g) =>
+        g.base.toLowerCase().includes(needle) ||
+        g.rows.some(
+          (r) =>
+            r.sku.toLowerCase().includes(needle) ||
+            r.productName.toLowerCase().includes(needle)
+        )
     );
-    list = list.sort((a, b) => {
-      const av = a[sortKey] ?? 0;
-      const bv = b[sortKey] ?? 0;
-      if (av === bv) return 0;
-      const cmp = av > bv ? 1 : -1;
-      return asc ? cmp : -cmp;
-    });
-    return list;
-  }, [saved, q, sortKey, asc]);
+  }, [groups, q]);
 
   const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE));
-  const pageRows = filtered.slice((page - 1) * PAGE, page * PAGE);
+  const pageGroups = filtered.slice((page - 1) * PAGE, page * PAGE);
 
-  function toggleSort(k: keyof SavedPrice) {
-    if (k === sortKey) setAsc((v) => !v);
-    else {
-      setSortKey(k);
-      setAsc(true);
-    }
-  }
+  const toggle = (base: string) =>
+    setOpen((prev) => {
+      const next = new Set(prev);
+      if (next.has(base)) next.delete(base);
+      else next.add(base);
+      return next;
+    });
 
-  function exportCsv(delimiter = ",", filename = "lepdo-prices.csv") {
+  // While searching, every matching group opens automatically.
+  const isOpen = (base: string) => (q.trim() ? true : open.has(base));
+
+  function exportRows(rows: SavedPrice[], delimiter = ",", filename = "lepdo-prices.csv") {
     const headers = [
       "Date",
       "SKU",
@@ -1678,7 +1856,7 @@ function SavedView({
       "Net Margin %",
     ];
     const lines = [headers.join(delimiter)];
-    for (const r of filtered) {
+    for (const r of rows) {
       lines.push(
         [
           new Date(r.date).toISOString(),
@@ -1689,7 +1867,7 @@ function SavedView({
           r.originalPrice,
           r.discountPct,
           r.netProfit.toFixed(2),
-          (r.netMargin ?? (r.sellingPrice > 0 ? (r.netProfit / r.sellingPrice) * 100 : 0)).toFixed(2),
+          marginOf(r).toFixed(2),
         ].join(delimiter)
       );
     }
@@ -1707,7 +1885,7 @@ function SavedView({
       <Card className="shadow-soft border-border/60">
         <CardContent className="p-4 flex flex-wrap items-center gap-3">
           <Input
-            placeholder="Search SKU or product…"
+            placeholder="Search Main SKU, sub-SKU or product…"
             value={q}
             onChange={(e) => {
               setQ(e.target.value);
@@ -1716,63 +1894,51 @@ function SavedView({
             className="max-w-xs h-10"
           />
           <div className="ml-auto flex flex-wrap gap-2">
-            <Button variant="outline" size="sm" onClick={() => exportCsv(",", "lepdo-prices.csv")}>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => exportRows(saved, ",", "lepdo-prices.csv")}
+            >
               <Download className="h-4 w-4 mr-2" /> Export CSV
             </Button>
-            <Button variant="outline" size="sm" onClick={() => exportCsv("\t", "lepdo-prices.xls")}>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => exportRows(saved, "\t", "lepdo-prices.xls")}
+            >
               <Download className="h-4 w-4 mr-2" /> Export Excel
             </Button>
           </div>
         </CardContent>
       </Card>
 
-      <Card className="shadow-soft border-border/60 overflow-hidden">
-        <div className="overflow-x-auto">
-          <Table>
-            <TableHeader>
-              <TableRow className="bg-secondary/40">
-                {[
-                  ["date", "Date"],
-                  ["sku", "SKU"],
-                  ["productName", "Product"],
-                  ["cost", "Cost"],
-                  ["sellingPrice", "Selling"],
-                  ["originalPrice", "Original"],
-                  ["discountPct", "Disc %"],
-                  ["netProfit", "Net Profit"],
-                ].map(([k, label]) => (
-                  <TableHead
-                    key={k}
-                    className="cursor-pointer select-none"
-                    onClick={() => toggleSort(k as keyof SavedPrice)}
-                  >
-                    {label}
-                    {sortKey === k && (
-                      <span className="ml-1 text-xs">{asc ? "▲" : "▼"}</span>
-                    )}
-                  </TableHead>
-                ))}
-                <TableHead className="text-right">Actions</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {pageRows.length === 0 && (
-                <TableRow>
-                  <TableCell colSpan={9} className="text-center py-12 text-muted-foreground">
-                    No saved products yet.
-                  </TableCell>
-                </TableRow>
-              )}
-              {pageRows.map((r) => (
-                <SavedRow key={r.id} row={r} refresh={refresh} settings={settings} />
-              ))}
-            </TableBody>
-          </Table>
-        </div>
-        {pageCount > 1 && (
-          <div className="p-4 flex items-center justify-between border-t border-border">
+      {pageGroups.length === 0 && (
+        <Card className="shadow-soft border-border/60">
+          <CardContent className="p-12 text-center text-muted-foreground">
+            {saved.length === 0 ? "No saved products yet." : "No saved groups match your search."}
+          </CardContent>
+        </Card>
+      )}
+
+      <div className="space-y-3">
+        {pageGroups.map((g) => (
+          <SavedGroupCard
+            key={g.base}
+            group={g}
+            open={isOpen(g.base)}
+            onToggle={() => toggle(g.base)}
+            refresh={refresh}
+            settings={settings}
+            exportRows={exportRows}
+          />
+        ))}
+      </div>
+
+      {pageCount > 1 && (
+        <Card className="shadow-soft border-border/60">
+          <CardContent className="p-4 flex items-center justify-between">
             <p className="text-sm text-muted-foreground">
-              Page {page} of {pageCount} · {filtered.length} items
+              Page {page} of {pageCount} · {filtered.length} groups · {saved.length} items
             </p>
             <div className="flex gap-2">
               <Button
@@ -1792,11 +1958,213 @@ function SavedView({
                 Next
               </Button>
             </div>
-          </div>
-        )}
-      </Card>
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
+}
+
+function SavedGroupCard({
+  group,
+  open,
+  onToggle,
+  refresh,
+  settings,
+  exportRows,
+}: {
+  group: SavedGroup;
+  open: boolean;
+  onToggle: () => void;
+  refresh: () => void;
+  settings: PricingSettings;
+  exportRows: (rows: SavedPrice[], delimiter?: string, filename?: string) => void;
+}) {
+  const { base, rows } = group;
+  const sellMin = Math.min(...rows.map((r) => r.sellingPrice));
+  const sellMax = Math.max(...rows.map((r) => r.sellingPrice));
+  const profMin = Math.min(...rows.map((r) => r.netProfit));
+  const profMax = Math.max(...rows.map((r) => r.netProfit));
+  const range = (a: number, b: number) =>
+    a === b
+      ? `$${Math.round(a).toLocaleString("en-US")}`
+      : `$${Math.round(a).toLocaleString("en-US")}–$${Math.round(b).toLocaleString("en-US")}`;
+
+  function renameGroup() {
+    const next = prompt("Rename Main SKU / Base SKU:", base);
+    const newBase = (next || "").trim();
+    if (!newBase || newBase === base) return;
+    for (const r of rows) {
+      const sku = r.sku.trim();
+      const newSku =
+        sku.toLowerCase() === base.toLowerCase()
+          ? newBase
+          : sku.toLowerCase().startsWith(`${base.toLowerCase()}-`)
+            ? `${newBase}-${sku.slice(base.length + 1)}`
+            : sku;
+      updateSaved(r.id, { sku: newSku });
+    }
+    refresh();
+    toast.success(`Renamed group to ${newBase}`);
+  }
+
+  function recalcGroup() {
+    let ok = 0;
+    for (const r of rows) {
+      const price = roundPrice(calculateSellingPrice(r.cost, settings));
+      if (!Number.isFinite(price)) continue;
+      const bd = computeBreakdown(r.cost, price, settings);
+      updateSaved(r.id, {
+        sellingPrice: price,
+        originalPrice: compareAtPrice(price, r.discountPct),
+        netProfit: bd.netProfit,
+        netMargin: bd.netProfitPct,
+      });
+      ok++;
+    }
+    refresh();
+    if (ok === rows.length) toast.success(`Recalculated ${ok} variants with latest pricing logic`);
+    else toast.error(`Recalculated ${ok}/${rows.length} — some targets unreachable.`);
+  }
+
+  function deleteGroup() {
+    if (!confirm(`Delete group "${base}" with ${rows.length} variant${rows.length === 1 ? "" : "s"}? This cannot be undone.`))
+      return;
+    for (const r of rows) deleteSaved(r.id);
+    refresh();
+    toast.success(`Deleted group ${base}`);
+  }
+
+  return (
+    <Card className="shadow-soft border-border/60 overflow-hidden">
+      {/* Accordion header — click anywhere to open/close */}
+      <div
+        role="button"
+        tabIndex={0}
+        aria-expanded={open}
+        onClick={onToggle}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onToggle();
+          }
+        }}
+        className="w-full text-left p-4 flex flex-wrap items-center gap-x-3 gap-y-2 cursor-pointer select-none hover:bg-secondary/30 transition-colors"
+      >
+        <ChevronDown
+          className={`h-5 w-5 shrink-0 text-primary transition-transform duration-300 ${
+            open ? "rotate-0" : "-rotate-90"
+          }`}
+        />
+        <div className="min-w-0">
+          <p className="font-mono font-semibold text-primary truncate">{base}</p>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            Date: {new Date(group.latest).toLocaleDateString("en-GB")} · {rows.length} Variant
+            {rows.length === 1 ? "" : "s"} · Selling Range: {range(sellMin, sellMax)} · Profit
+            Range: {range(profMin, profMax)}
+          </p>
+        </div>
+        <div
+          className="ml-auto flex flex-wrap gap-1"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <IconBtn onClick={renameGroup} label="Rename Main SKU">
+            <Pencil className="h-3.5 w-3.5" />
+          </IconBtn>
+          <IconBtn onClick={recalcGroup} label="Recalculate all variants with latest pricing logic">
+            <RefreshCw className="h-3.5 w-3.5" />
+          </IconBtn>
+          <IconBtn
+            onClick={() => exportRows(rows, ",", `${base || "lepdo-group"}.csv`)}
+            label="Export this group as CSV"
+          >
+            <Download className="h-3.5 w-3.5" />
+          </IconBtn>
+          <IconBtn onClick={deleteGroup} label="Delete entire group" danger>
+            <Trash2 className="h-3.5 w-3.5" />
+          </IconBtn>
+        </div>
+      </div>
+
+      {/* Accordion body — smooth grid-rows animation */}
+      <div
+        className={`grid transition-[grid-template-rows] duration-300 ease-in-out ${
+          open ? "grid-rows-[1fr]" : "grid-rows-[0fr]"
+        }`}
+      >
+        <div className="overflow-hidden">
+          <div className="border-t border-border/60">
+            {/* Desktop: compact table */}
+            <div className="hidden md:block overflow-x-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow className="bg-secondary/40">
+                    <TableHead>SKU</TableHead>
+                    <TableHead>Product</TableHead>
+                    <TableHead className="text-right">Cost</TableHead>
+                    <TableHead className="text-right">Selling</TableHead>
+                    <TableHead className="text-right">Original</TableHead>
+                    <TableHead className="text-right">Discount</TableHead>
+                    <TableHead className="text-right">Net Profit</TableHead>
+                    <TableHead className="text-right">Margin</TableHead>
+                    <TableHead className="text-right">Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {rows.map((r) => (
+                    <SavedRow key={r.id} row={r} refresh={refresh} settings={settings} />
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+            {/* Mobile: stacked variant cards */}
+            <div className="md:hidden divide-y divide-border/60">
+              {rows.map((r) => (
+                <VariantCard key={r.id} row={r} refresh={refresh} settings={settings} />
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+/* -------- Shared variant actions -------- */
+
+function useVariantActions(row: SavedPrice, refresh: () => void, settings: PricingSettings) {
+  function copy(text: string, label: string) {
+    navigator.clipboard.writeText(text);
+    toast.success(`${label} copied`);
+  }
+  function duplicate() {
+    addSaved({ ...row, id: `${Date.now()}`, date: new Date().toISOString() });
+    refresh();
+    toast.success("Duplicated");
+  }
+  function recalculate() {
+    const price = roundPrice(calculateSellingPrice(row.cost, settings));
+    if (!Number.isFinite(price)) {
+      toast.error("Target unreachable with current pricing logic.");
+      return;
+    }
+    const bd = computeBreakdown(row.cost, price, settings);
+    updateSaved(row.id, {
+      sellingPrice: price,
+      originalPrice: compareAtPrice(price, row.discountPct),
+      netProfit: bd.netProfit,
+      netMargin: bd.netProfitPct,
+    });
+    refresh();
+    toast.success("Recalculated with latest pricing logic");
+  }
+  function remove() {
+    if (confirm(`Delete ${row.sku || row.productName}?`)) {
+      deleteSaved(row.id);
+      refresh();
+    }
+  }
+  return { copy, duplicate, recalculate, remove };
 }
 
 function SavedRow({
@@ -1811,18 +2179,11 @@ function SavedRow({
   const [edit, setEdit] = useState(false);
   const [draft, setDraft] = useState(row);
   useEffect(() => setDraft(row), [row]);
-
-  function copy(text: string, label: string) {
-    navigator.clipboard.writeText(text);
-    toast.success(`${label} copied`);
-  }
+  const actions = useVariantActions(row, refresh, settings);
 
   if (edit) {
     return (
       <TableRow className="bg-secondary/20">
-        <TableCell className="text-xs text-muted-foreground">
-          {new Date(row.date).toLocaleDateString()}
-        </TableCell>
         <TableCell>
           <Input
             value={draft.sku}
@@ -1877,6 +2238,9 @@ function SavedRow({
             className="h-8 w-20 text-right"
           />
         </TableCell>
+        <TableCell className="text-right tabular-nums text-muted-foreground">
+          {draft.sellingPrice > 0 ? ((draft.netProfit / draft.sellingPrice) * 100).toFixed(1) : "0.0"}%
+        </TableCell>
         <TableCell className="text-right space-x-1 whitespace-nowrap">
           <Button
             size="sm"
@@ -1899,10 +2263,9 @@ function SavedRow({
 
   return (
     <TableRow>
-      <TableCell className="text-xs text-muted-foreground whitespace-nowrap">
-        {new Date(row.date).toLocaleDateString()}
+      <TableCell className="font-mono font-medium text-xs whitespace-nowrap">
+        {row.sku || "—"}
       </TableCell>
-      <TableCell className="font-mono font-medium">{row.sku}</TableCell>
       <TableCell>{row.productName}</TableCell>
       <TableCell className="text-right tabular-nums">{fmtUsd(row.cost)}</TableCell>
       <TableCell className="text-right tabular-nums font-semibold text-primary">
@@ -1917,63 +2280,150 @@ function SavedRow({
       <TableCell className="text-right tabular-nums text-success font-semibold">
         {fmtUsd(row.netProfit)}
       </TableCell>
+      <TableCell className="text-right tabular-nums">{marginOf(row).toFixed(1)}%</TableCell>
       <TableCell className="text-right whitespace-nowrap">
         <div className="inline-flex gap-1">
-          <IconBtn onClick={() => copy(String(row.sellingPrice), "Price")} label="Copy price">
+          <IconBtn onClick={() => actions.copy(String(row.sellingPrice), "Price")} label="Copy price">
             <Copy className="h-3.5 w-3.5" />
           </IconBtn>
-          <IconBtn onClick={() => copy(row.sku, "SKU")} label="Copy SKU">
+          <IconBtn onClick={() => actions.copy(row.sku, "SKU")} label="Copy SKU">
             <Files className="h-3.5 w-3.5" />
           </IconBtn>
-          <IconBtn
-            onClick={() => {
-              addSaved({ ...row, id: `${Date.now()}`, date: new Date().toISOString() });
-              refresh();
-              toast.success("Duplicated");
-            }}
-            label="Duplicate"
-          >
+          <IconBtn onClick={actions.duplicate} label="Duplicate">
             <Files className="h-3.5 w-3.5" />
           </IconBtn>
-          <IconBtn
-            onClick={() => {
-              const price = roundPrice(calculateSellingPrice(row.cost, settings));
-              if (!Number.isFinite(price)) {
-                toast.error("Target unreachable with current pricing logic.");
-                return;
-              }
-              const bd = computeBreakdown(row.cost, price, settings);
-              updateSaved(row.id, {
-                sellingPrice: price,
-                originalPrice: compareAtPrice(price, row.discountPct),
-                netProfit: bd.netProfit,
-                netMargin: bd.netProfitPct,
-              });
-              refresh();
-              toast.success("Recalculated with latest pricing logic");
-            }}
-            label="Recalculate with latest pricing logic"
-          >
+          <IconBtn onClick={actions.recalculate} label="Recalculate with latest pricing logic">
             <RefreshCw className="h-3.5 w-3.5" />
           </IconBtn>
           <IconBtn onClick={() => setEdit(true)} label="Edit">
             <Pencil className="h-3.5 w-3.5" />
           </IconBtn>
-          <IconBtn
-            onClick={() => {
-              if (confirm(`Delete ${row.sku}?`)) {
-                deleteSaved(row.id);
-                refresh();
-              }
-            }}
-            label="Delete"
-            danger
-          >
+          <IconBtn onClick={actions.remove} label="Delete" danger>
             <Trash2 className="h-3.5 w-3.5" />
           </IconBtn>
         </div>
       </TableCell>
     </TableRow>
+  );
+}
+
+/** Mobile variant card — stacked layout shown inside an open accordion. */
+function VariantCard({
+  row,
+  refresh,
+  settings,
+}: {
+  row: SavedPrice;
+  refresh: () => void;
+  settings: PricingSettings;
+}) {
+  const [edit, setEdit] = useState(false);
+  const [draft, setDraft] = useState(row);
+  useEffect(() => setDraft(row), [row]);
+  const actions = useVariantActions(row, refresh, settings);
+
+  if (edit) {
+    const field = (
+      label: string,
+      key: keyof SavedPrice,
+      numeric = false
+    ) => (
+      <label className="block">
+        <span className="text-[10px] uppercase tracking-wide text-muted-foreground">{label}</span>
+        <Input
+          type={numeric ? "number" : "text"}
+          value={String(draft[key] ?? "")}
+          onChange={(e) =>
+            setDraft({
+              ...draft,
+              [key]: numeric ? parseFloat(e.target.value) || 0 : e.target.value,
+            })
+          }
+          className="h-8 mt-0.5"
+        />
+      </label>
+    );
+    return (
+      <div className="p-3 space-y-2 bg-secondary/20">
+        {field("SKU", "sku")}
+        {field("Product", "productName")}
+        <div className="grid grid-cols-2 gap-2">
+          {field("Cost", "cost", true)}
+          {field("Selling", "sellingPrice", true)}
+          {field("Original", "originalPrice", true)}
+          {field("Discount %", "discountPct", true)}
+          {field("Net Profit", "netProfit", true)}
+        </div>
+        <div className="flex gap-2 pt-1">
+          <Button
+            size="sm"
+            onClick={() => {
+              updateSaved(row.id, draft);
+              refresh();
+              setEdit(false);
+              toast.success("Updated");
+            }}
+          >
+            Save
+          </Button>
+          <Button size="sm" variant="outline" onClick={() => setEdit(false)}>
+            Cancel
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="p-3 space-y-2">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <p className="font-mono text-xs font-semibold text-primary break-all">
+            {row.sku || "—"}
+          </p>
+          <p className="text-sm">{row.productName}</p>
+        </div>
+        <Badge variant="secondary">{row.discountPct}% off</Badge>
+      </div>
+      <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
+        <p className="text-muted-foreground">Cost</p>
+        <p className="text-right tabular-nums">{fmtUsd(row.cost)}</p>
+        <p className="text-muted-foreground">Selling</p>
+        <p className="text-right tabular-nums font-semibold text-primary">
+          {fmtUsd(row.sellingPrice)}
+        </p>
+        <p className="text-muted-foreground">Original</p>
+        <p className="text-right tabular-nums text-muted-foreground line-through">
+          {fmtUsd(row.originalPrice)}
+        </p>
+        <p className="text-muted-foreground">Net Profit</p>
+        <p className="text-right tabular-nums text-success font-semibold">
+          {fmtUsd(row.netProfit)}
+        </p>
+        <p className="text-muted-foreground">Margin</p>
+        <p className="text-right tabular-nums">{marginOf(row).toFixed(1)}%</p>
+      </div>
+      <div className="flex flex-wrap gap-1 pt-1">
+        <IconBtn onClick={() => actions.copy(String(row.sellingPrice), "Price")} label="Copy price">
+          <Copy className="h-3.5 w-3.5" />
+        </IconBtn>
+        <IconBtn onClick={() => actions.copy(row.sku, "SKU")} label="Copy SKU">
+          <Files className="h-3.5 w-3.5" />
+        </IconBtn>
+        <IconBtn onClick={actions.duplicate} label="Duplicate">
+          <Files className="h-3.5 w-3.5" />
+        </IconBtn>
+        <IconBtn onClick={actions.recalculate} label="Recalculate with latest pricing logic">
+          <RefreshCw className="h-3.5 w-3.5" />
+        </IconBtn>
+        <IconBtn onClick={() => setEdit(true)} label="Edit">
+          <Pencil className="h-3.5 w-3.5" />
+        </IconBtn>
+        <IconBtn onClick={actions.remove} label="Delete" danger>
+          <Trash2 className="h-3.5 w-3.5" />
+        </IconBtn>
+      </div>
+    </div>
   );
 }
 

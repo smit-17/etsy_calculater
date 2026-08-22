@@ -302,18 +302,20 @@ export interface QuotedItem {
   cost: number; // USD
 }
 
+// (?![a-zA-Z]) instead of \b — pasted tables glue metal names to gram
+// numbers (e.g. "18KT3.51", "Silver2.4") where no word boundary exists.
 const METALS: { key: string; label: string; re: RegExp }[] = [
-  { key: "10KT", label: "10KT", re: /(^|[^0-9])10\s*(?:kt|k|karat|carat)\b/i },
-  { key: "14KT", label: "14KT", re: /(^|[^0-9])14\s*(?:kt|k|karat|carat)\b/i },
-  { key: "18KT", label: "18KT", re: /(^|[^0-9])18\s*(?:kt|k|karat|carat)\b/i },
-  { key: "SILVER", label: "Silver", re: /\bsilver\b/i },
-  { key: "PLATINUM", label: "Platinum", re: /\b(?:platinum|plat|950\s*pt|pt\s*950)\b/i },
+  { key: "10KT", label: "10KT", re: /(^|[^0-9])10\s*(?:kt|k|karat|carat)(?![a-zA-Z])/i },
+  { key: "14KT", label: "14KT", re: /(^|[^0-9])14\s*(?:kt|k|karat|carat)(?![a-zA-Z])/i },
+  { key: "18KT", label: "18KT", re: /(^|[^0-9])18\s*(?:kt|k|karat|carat)(?![a-zA-Z])/i },
+  { key: "SILVER", label: "Silver", re: /(^|[^a-zA-Z])silver(?![a-zA-Z])/i },
+  { key: "PLATINUM", label: "Platinum", re: /(^|[^a-zA-Z])(?:platinum|plat|950\s*pt|pt\s*950)(?![a-zA-Z])/i },
 ];
 
 /** All numeric tokens in a row, in column order. */
 function rowNumbers(line: string): { value: number; rupee: boolean }[] {
   // strip purity tokens like "10KT" / "18 K" so they aren't read as amounts
-  const cleaned = line.replace(/(^|[^0-9])(\d{2})\s*(?:kt|k|karat|carat)\b/gi, "$1 ");
+  const cleaned = line.replace(/(^|[^0-9])(\d{2})\s*(?:kt|k|karat|carat)(?![a-zA-Z])/gi, "$1 ");
   const out: { value: number; rupee: boolean }[] = [];
   const re = /(₹|rs\.?|inr)?\s*([0-9][0-9,]*(?:\.[0-9]+)?)/gi;
   let m: RegExpExecArray | null;
@@ -379,7 +381,7 @@ export function parseJewelryQuotation(
   };
 
   const consume = (segment: string) => {
-    if (/(^|[^0-9])(?:24|22)\s*(?:kt|k|karat|carat)\b/i.test(segment)) return;
+    if (/(^|[^0-9])(?:24|22)\s*(?:kt|k|karat|carat)(?![a-zA-Z])/i.test(segment)) return;
     const metalHit = METALS.find((m) => m.re.test(segment));
     if (!metalHit) return;
     if (found.has(`${metalHit.key}-LGD`) && found.has(`${metalHit.key}-Moissanite`)) return;
@@ -389,7 +391,7 @@ export function parseJewelryQuotation(
   };
 
   const metalRe =
-    /(?:10|14|18|22|24)\s*(?:kt|k|karat|carat)\b|silver\b|(?:platinum|plat|950\s*pt|pt\s*950)\b/gi;
+    /(?:10|14|18|22|24)\s*(?:kt|k|karat|carat)(?![a-zA-Z])|silver(?![a-zA-Z])|(?:platinum|plat|950\s*pt|pt\s*950)(?![a-zA-Z])/gi;
 
 
   for (const raw of text.split(/\r?\n/)) {
