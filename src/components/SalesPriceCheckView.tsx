@@ -127,6 +127,8 @@ export function SalesPriceCheckView({ settings }: { settings: PricingSettings })
     const tds = S * (settings.tds / 100);
     const tcs = S * (settings.tcs / 100);
     const payout = S - tf - pf - reg - gst - offsite - tds - tcs;
+    const payoneer = payout * ((settings.payoneerFee || 0) / 100);
+    const bankReceipt = payout - payoneer;
     const adsPct =
       c.adsMode === "none" ? 0 : c.adsMode === "custom" ? num(c.adsCustom) : settings.adsSpend;
     const ads = S * (adsPct / 100);
@@ -136,6 +138,7 @@ export function SalesPriceCheckView({ settings }: { settings: PricingSettings })
       ads -
       settings.shipping -
       cost -
+      payoneer -
       (settings.tdsTcsFinalCost ? tds + tcs : 0);
     const tax = profitBefore > 0 ? profitBefore * (settings.incomeTax / 100) : 0;
     const net = profitBefore - tax;
@@ -160,13 +163,15 @@ export function SalesPriceCheckView({ settings }: { settings: PricingSettings })
       tcs,
       totalFees,
       payout,
+      payoneer,
+      bankReceipt,
       ads,
       adsPct,
       profitBefore,
       tax,
       net,
       margin,
-      good: margin >= settings.targetNetProfit,
+      good: margin >= settings.targetNetProfit && net >= (settings.minNetProfit || 0),
     };
   }, [checked, settings, rate]);
 
@@ -201,6 +206,8 @@ export function SalesPriceCheckView({ settings }: { settings: PricingSettings })
         [`TDS (${settings.tds}%)`, `− ${fmtDual(result.tds)}`],
         [`TCS (${settings.tcs}%)`, `− ${fmtDual(result.tcs)}`],
         ["Expected Etsy Cash Payout", fmtDual(result.payout), true],
+        [`Payoneer Fee (${settings.payoneerFee}%)`, `− ${fmtDual(result.payoneer)}`],
+        ["Expected Bank Receipt", fmtDual(result.bankReceipt), true],
         [`Average Ads Cost (${result.adsPct}%)`, `− ${fmtDual(result.ads)}`],
         ["Shipping Cost", `− ${fmtDual(settings.shipping)}`],
         ["Product Cost", `− ${fmtDual(result.cost)}`],

@@ -7,12 +7,14 @@ export interface PricingSettings {
   sellerFeeGst: number; // % GST charged on seller fees (default 0)
   tds: number; // %
   tcs: number; // %
+  payoneerFee: number; // % charged by Payoneer on the Etsy cash payout
   tdsTcsFinalCost: boolean; // treat TDS/TCS as final cost
   adsSpend: number; // average Etsy ads cost %
   offsiteAdsOn: boolean;
   offsiteAdsPct: number; // %
   incomeTax: number; // %
   targetNetProfit: number; // %
+  minNetProfit: number; // $ minimum final net profit per order
   shipping: number; // $
   buyerTaxOn: boolean;
   buyerTaxPct: number; // %
@@ -27,12 +29,14 @@ export const DEFAULT_SETTINGS: PricingSettings = {
   sellerFeeGst: 0,
   tds: 0.1,
   tcs: 0.5,
+  payoneerFee: 2.5,
   tdsTcsFinalCost: false,
   adsSpend: 15,
   offsiteAdsOn: false,
   offsiteAdsPct: 15,
   incomeTax: 15,
   targetNetProfit: 10,
+  minNetProfit: 50,
   shipping: 60,
   buyerTaxOn: false,
   buyerTaxPct: 0,
@@ -50,6 +54,8 @@ export interface Breakdown {
   tcs: number;
   withheldTotal: number;
   cashPayout: number; // after withholding
+  payoneerFee: number;
+  bankReceipt: number; // cash payout after Payoneer fee
   revenueAfterEtsyFees: number; // economic, before withholding
   adsSpend: number;
   shipping: number;
@@ -69,6 +75,7 @@ interface Rates {
   gst: number;
   tds: number;
   tcs: number;
+  payoneer: number;
   ads: number;
   offsite: number;
   it: number;
@@ -91,6 +98,7 @@ function rates(s: PricingSettings, o?: CalcOptions): Rates {
     gst: s.sellerFeeGst / 100,
     tds: s.tds / 100,
     tcs: s.tcs / 100,
+    payoneer: (s.payoneerFee || 0) / 100,
     ads: adsPct / 100,
     offsite: s.offsiteAdsOn ? s.offsiteAdsPct / 100 : 0,
     it: s.incomeTax / 100,
@@ -117,16 +125,46 @@ export function calculateSellingPrice(
   o?: CalcOptions
 ): number {
   const r = rates(s, o);
+  // A = share of S left after Etsy fees, B = fixed fee in USD
+  const A = 1 - (r.tf + r.pf + r.reg) * (1 + r.gst) - r.offsite;
+  const B = r.fixedUsd * (1 + r.gst);
+  // Payoneer fee applies to the Etsy cash payout (after TDS/TCS withholding)
   const K =
-    1 -
-    (r.tf + r.pf + r.reg) * (1 + r.gst) -
-    r.offsite -
-    r.ads -
-    (r.final ? r.tds + r.tcs : 0);
-  const C = r.fixedUsd * (1 + r.gst) + s.shipping + cost;
+    A - r.ads - (r.final ? r.tds + r.tcs : 0) - r.payoneer * (A - r.tds - r.tcs);
+  const C = B * (1 - r.payoneer) + s.shipping + cost;
+  if (!(K > 0)) return NaN;
+
+  // Rule 1: net profit = target% of selling price
   const denom = K - r.target / (1 - r.it);
-  if (!(denom > 0)) return NaN;
-  return C / denom;
+  const byMargin = denom > 0 ? C / denom : NaN;
+
+  // Rule 2: net profit >= minimum $ amount
+  const minNet = s.minNetProfit > 0 ? s.minNetProfit : 0;
+  const byMin = minNet > 0 ? (minNet / (1 - r.it) + C) / K : NaN;
+
+  const candidates = [byMargin, byMin].filter((n) => Number.isFinite(n) && n > 0);
+  if (!candidates.length) return NaN;
+  return Math.max(...candidates);
+}
+
+/** True when the $ minimum-profit rule drives the price instead of the % target. */
+export function isMinProfitDriven(
+  cost: number,
+  s: PricingSettings,
+  o?: CalcOptions
+): boolean {
+  const r = rates(s, o);
+  const A = 1 - (r.tf + r.pf + r.reg) * (1 + r.gst) - r.offsite;
+  const B = r.fixedUsd * (1 + r.gst);
+  const K =
+    A - r.ads - (r.final ? r.tds + r.tcs : 0) - r.payoneer * (A - r.tds - r.tcs);
+  const C = B * (1 - r.payoneer) + s.shipping + cost;
+  if (!(K > 0)) return false;
+  const denom = K - r.target / (1 - r.it);
+  const byMargin = denom > 0 ? C / denom : 0;
+  const minNet = s.minNetProfit > 0 ? s.minNetProfit : 0;
+  const byMin = minNet > 0 ? (minNet / (1 - r.it) + C) / K : 0;
+  return byMin > byMargin;
 }
 
 
@@ -149,9 +187,11 @@ export function computeBreakdown(
   const withheld = TDS + TCS;
   const revenueAfterFees = S - TF - PF - REG - GST - OFF;
   const cashPayout = revenueAfterFees - withheld;
+  const payoneer = cashPayout * r.payoneer;
+  const bankReceipt = cashPayout - payoneer;
   const Ads = S * r.ads;
   const profitBefore =
-    revenueAfterFees - Ads - s.shipping - cost - (r.final ? withheld : 0);
+    revenueAfterFees - Ads - s.shipping - cost - payoneer - (r.final ? withheld : 0);
   const tax = profitBefore > 0 ? profitBefore * r.it : 0;
   const net = profitBefore - tax;
   const buyerTax = s.buyerTaxOn ? S * (s.buyerTaxPct / 100) : 0;
@@ -167,6 +207,8 @@ export function computeBreakdown(
     tcs: TCS,
     withheldTotal: withheld,
     cashPayout,
+    payoneerFee: payoneer,
+    bankReceipt,
     revenueAfterEtsyFees: revenueAfterFees,
     adsSpend: Ads,
     shipping: s.shipping,
@@ -269,24 +311,48 @@ const METALS: { key: string; label: string; re: RegExp }[] = [
 ];
 
 /** All numeric tokens in a row, in column order. */
-function rowNumbers(line: string): number[] {
+function rowNumbers(line: string): { value: number; rupee: boolean }[] {
   // strip purity tokens like "10KT" / "18 K" so they aren't read as amounts
   const cleaned = line.replace(/(^|[^0-9])(\d{2})\s*(?:kt|k|karat|carat)\b/gi, "$1 ");
-  const out: number[] = [];
-  const re = /(?:₹|rs\.?|inr)?\s*([0-9][0-9,]*(?:\.[0-9]+)?)/gi;
+  const out: { value: number; rupee: boolean }[] = [];
+  const re = /(₹|rs\.?|inr)?\s*([0-9][0-9,]*(?:\.[0-9]+)?)/gi;
   let m: RegExpExecArray | null;
   while ((m = re.exec(cleaned))) {
-    const v = parseFloat(m[1].replace(/,/g, ""));
-    if (Number.isFinite(v)) out.push(v);
+    const v = parseFloat(m[2].replace(/,/g, ""));
+    if (Number.isFinite(v)) out.push({ value: v, rupee: Boolean(m[1]) });
   }
   return out;
 }
 
 /**
+ * Pick the final LGD / Moissanite totals from a quotation row.
+ * Summary format: Purity | Grams | Metal Total | LGD Amount | Moiss. Amount |
+ * Total (LGD) | Total (Moiss.)  -> the last two columns are the final costs.
+ * Legacy format: Purity | Grams | Metal | LGD | Natural | Moiss.
+ */
+function pickTotals(
+  tokens: { value: number; rupee: boolean }[]
+): { lgd: number; moiss: number } | null {
+  const nums = tokens.map((t) => t.value);
+  const rupeeCount = tokens.filter((t) => t.rupee).length;
+  const n = nums.length;
+  if (n < 2) return null;
+  // Summary table: last two columns are Total (LGD) / Total (Moiss.)
+  if (n >= 6) return { lgd: nums[n - 2], moiss: nums[n - 1] };
+  // Legacy table: Grams | Metal | LGD | Natural | Moiss.
+  if (n === 5 && rupeeCount < 5) return { lgd: nums[2], moiss: nums[4] };
+  if (n === 5) return { lgd: nums[n - 2], moiss: nums[n - 1] };
+  if (n === 3) return { lgd: nums[0], moiss: nums[2] };
+  return { lgd: nums[n - 2], moiss: nums[n - 1] };
+}
+
+
+/**
  * Extract the 10 supported metal × stone combinations from a pasted quotation
- * table with columns: Purity | Grams | Metal | LGD | Natural | Moiss.
- * Only the LGD and Moiss columns are used. 24KT, 22KT, the Natural column,
- * the metal-only column and any Total rows are ignored.
+ * summary. Values are always read as INR (quotation tables are ₹) and converted
+ * with the saved USD/INR rate. 24KT, 22KT and the Natural Diamond column are
+ * ignored, and Total (LGD) / Total (Moiss.) are used as-is (already metal +
+ * diamond combined) so nothing is double counted.
  */
 export function parseJewelryQuotation(
   text: string,
@@ -295,41 +361,58 @@ export function parseJewelryQuotation(
   const rate = usdInrRate > 0 ? usdInrRate : 1;
   const found = new Map<string, QuotedItem>();
 
-  for (const raw of text.split(/\r?\n/)) {
-    const line = raw.trim();
-    if (!line) continue;
-    if (/\btotal\b/i.test(line)) continue;
-    if (/(^|[^0-9])(?:24|22)\s*(?:kt|k|karat|carat)\b/i.test(line)) continue;
-
-    const metalHit = METALS.find((m) => m.re.test(line));
-    if (!metalHit) continue;
-    if (found.has(`${metalHit.key}-LGD`) && found.has(`${metalHit.key}-Moissanite`)) continue;
-
-    const nums = rowNumbers(line);
-    // need at least: grams, metal, LGD, Natural, Moiss (grams/metal may be absent)
-    if (nums.length < 3) continue;
-    const lgd = nums[nums.length - 3];
-    const moiss = nums[nums.length - 1];
-    if (!(lgd > 0) || !(moiss > 0)) continue;
-
+  const add = (metal: { key: string; label: string }, lgd: number, moiss: number) => {
     for (const [stone, inr] of [
       ["LGD", lgd],
       ["Moissanite", moiss],
     ] as ["LGD" | "Moissanite", number][]) {
-      const key = `${metalHit.key}-${stone}`;
-      if (found.has(key)) continue;
+      const key = `${metal.key}-${stone}`;
+      if (found.has(key) || !(inr > 0)) continue;
       found.set(key, {
-        metal: metalHit.label,
+        metal: metal.label,
         stone,
-        name: `${metalHit.label} ${stone}`,
+        name: `${metal.label} ${stone}`,
         inr,
         cost: inr / rate,
       });
     }
+  };
+
+  const consume = (segment: string) => {
+    if (/(^|[^0-9])(?:24|22)\s*(?:kt|k|karat|carat)\b/i.test(segment)) return;
+    const metalHit = METALS.find((m) => m.re.test(segment));
+    if (!metalHit) return;
+    if (found.has(`${metalHit.key}-LGD`) && found.has(`${metalHit.key}-Moissanite`)) return;
+    const totals = pickTotals(rowNumbers(segment));
+    if (!totals) return;
+    add(metalHit, totals.lgd, totals.moiss);
+  };
+
+  const metalRe =
+    /(?:10|14|18|22|24)\s*(?:kt|k|karat|carat)\b|silver\b|(?:platinum|plat|950\s*pt|pt\s*950)\b/gi;
+
+
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    // Several rows flattened onto one line — split at each metal name
+    metalRe.lastIndex = 0;
+    const starts: number[] = [];
+    let m: RegExpExecArray | null;
+    while ((m = metalRe.exec(line))) starts.push(m.index);
+    if (starts.length > 1) {
+      for (let i = 0; i < starts.length; i++) {
+        consume(line.slice(starts[i], starts[i + 1] ?? line.length));
+      }
+    } else {
+      consume(line);
+    }
   }
+
 
   const order: string[] = [];
   for (const m of METALS) for (const s of ["LGD", "Moissanite"]) order.push(`${m.key}-${s}`);
   return order.filter((k) => found.has(k)).map((k) => found.get(k)!);
 }
+
 

@@ -40,6 +40,7 @@ import {
   DEFAULT_SETTINGS,
   type PricingSettings,
   calculateSellingPrice,
+  isMinProfitDriven,
   computeBreakdown,
   parseProducts,
   roundPrice,
@@ -363,14 +364,14 @@ interface CalcRow {
   discountPct: number;
   adsOn: boolean;
   adsPct: number;
+  marginType: "none" | "pct" | "fixed";
+  marginPct: number;
+  marginUsd: number;
   expanded: boolean;
 }
 
-const DEFAULT_INPUT = `Silver 25000
-14KT LGD 55686
-ABC Ring 300`;
-
 const DISCOUNTS = [0, 10, 20, 30, 40, 50];
+const MARGIN_PRESETS = [5, 10, 15, 20];
 const ADS_PRESETS = [5, 10, 15, 20];
 
 function Dual({
@@ -395,14 +396,37 @@ function Dual({
 function useRowCalc(row: CalcRow, settings: PricingSettings) {
   return useMemo(() => {
     const opts = { adsPct: row.adsOn ? row.adsPct : 0 };
-    const rawAuto = calculateSellingPrice(row.cost, settings, opts);
-    const auto = Number.isFinite(rawAuto) ? roundPrice(rawAuto) : 0;
+    const rawBase = calculateSellingPrice(row.cost, settings, opts);
+    const base = Number.isFinite(rawBase) ? roundPrice(rawBase) : 0;
+
+    // A % margin is a TARGET net-profit margin: re-solve the price so that
+    // net profit ÷ selling price equals exactly that %. A fixed amount is
+    // simply added on top of the base required price.
+    let auto = base;
+    if (row.marginType === "pct" && row.marginPct > 0) {
+      const raw = calculateSellingPrice(
+        row.cost,
+        { ...settings, targetNetProfit: row.marginPct },
+        opts
+      );
+      auto = Number.isFinite(raw) ? roundPrice(raw) : 0;
+    } else if (row.marginType === "fixed") {
+      auto = roundPrice(base + row.marginUsd);
+    }
+    const marginAmount = auto - base;
+    const targetSettings =
+      row.marginType === "pct" && row.marginPct > 0
+        ? { ...settings, targetNetProfit: row.marginPct }
+        : settings;
+    const minApplied =
+      row.priceMode === "auto" && isMinProfitDriven(row.cost, targetSettings, opts);
     const selling = row.priceMode === "auto" ? auto : row.manualPrice;
     const bd = computeBreakdown(row.cost, selling, settings, opts);
     const original = compareAtPrice(selling, row.discountPct);
-    return { auto, selling, bd, original };
+    return { base, marginAmount, auto, selling, bd, original, minApplied };
   }, [row, settings]);
 }
+
 
 function CalculatorView({
   settings,
@@ -411,11 +435,38 @@ function CalculatorView({
   settings: PricingSettings;
   onSaved: () => void;
 }) {
-  const [input, setInput] = useState(DEFAULT_INPUT);
-  const [quote, setQuote] = useState("");
-  const [mode, setMode] = useState<"costs" | "quote">("costs");
+  const [input, setInput] = useState("");
   const [currency, setCurrency] = useState<"USD" | "INR">("USD");
   const [rows, setRows] = useState<CalcRow[]>([]);
+
+  // Global pre-calculate options — default 40% discount, 10% target margin
+  const [discountMode, setDiscountMode] = useState<"none" | "preset" | "custom">("preset");
+  const [discountPreset, setDiscountPreset] = useState(40);
+  const [discountCustom, setDiscountCustom] = useState("");
+
+  const [marginMode, setMarginMode] = useState<"none" | "preset" | "custom">("preset");
+  const [marginPreset, setMarginPreset] = useState(10);
+  const [marginKind, setMarginKind] = useState<"pct" | "amount">("pct");
+  const [marginCustom, setMarginCustom] = useState("");
+  const [marginCurrency, setMarginCurrency] = useState<"USD" | "INR">("USD");
+
+  const discountPct =
+    discountMode === "none"
+      ? 0
+      : discountMode === "preset"
+      ? discountPreset
+      : parseFloat(discountCustom) || 0;
+
+  const marginCfg = useMemo(() => {
+    if (marginMode === "none") return { marginType: "none" as const, marginPct: 0, marginUsd: 0 };
+    if (marginMode === "preset")
+      return { marginType: "pct" as const, marginPct: marginPreset, marginUsd: 0 };
+    const v = parseFloat(marginCustom) || 0;
+    if (marginKind === "pct")
+      return { marginType: "pct" as const, marginPct: v, marginUsd: 0 };
+    const usd = marginCurrency === "INR" ? v / (settings.usdInrRate || 1) : v;
+    return { marginType: "fixed" as const, marginPct: 0, marginUsd: usd };
+  }, [marginMode, marginPreset, marginKind, marginCustom, marginCurrency, settings.usdInrRate]);
 
   function buildRows(parsed: { name: string; cost: number; note?: string }[]) {
     const nextRows: CalcRow[] = parsed.map((p, i) => ({
@@ -426,9 +477,10 @@ function CalculatorView({
       priceMode: "auto",
       manualPrice: 0,
       sku: "",
-      discountPct: 30,
+      discountPct,
       adsOn: true,
       adsPct: settings.adsSpend,
+      ...marginCfg,
       expanded: false,
     }));
     setRows(nextRows);
@@ -437,14 +489,11 @@ function CalculatorView({
   }
 
   function calculate() {
-    if (mode === "quote") {
-      const items = parseJewelryQuotation(quote, settings.usdInrRate);
-      if (!items.length) {
-        toast.error("No 10KT/14KT/18KT/Silver/Platinum LGD or Moissanite rows found.");
-        return;
-      }
+    // A pasted quotation table is detected automatically; otherwise free-form lines.
+    const quoted = parseJewelryQuotation(input, settings.usdInrRate);
+    if (quoted.length >= 2) {
       buildRows(
-        items.map((it) => ({
+        quoted.map((it) => ({
           name: it.name,
           cost: it.cost,
           note: `₹${it.inr.toLocaleString("en-IN")}`,
@@ -498,91 +547,163 @@ function CalculatorView({
     toast.success(`Saved ${r.sku}`);
   }
 
+  const selectCls =
+    "h-9 rounded-md border border-input bg-background px-2 text-sm";
+
   return (
     <div className="space-y-6 pb-24 md:pb-0">
       <Card className="shadow-soft border-border/60">
-        <CardHeader>
+        <CardHeader className="flex flex-row items-center justify-between gap-3 space-y-0">
           <CardTitle className="font-display text-xl">Cost Calculator</CardTitle>
+          <div className="flex items-center gap-1 rounded-lg border border-border p-1">
+            {(["USD", "INR"] as const).map((c) => (
+              <Button
+                key={c}
+                type="button"
+                size="sm"
+                className="h-8 px-3"
+                variant={currency === c ? "default" : "ghost"}
+                onClick={() => setCurrency(c)}
+              >
+                {c === "USD" ? "$ USD" : "₹ INR"}
+              </Button>
+            ))}
+          </div>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="flex flex-wrap gap-2">
-            <Button
-              type="button"
-              size="sm"
-              variant={mode === "costs" ? "default" : "outline"}
-              onClick={() => setMode("costs")}
-            >
-              Cost
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              variant={mode === "quote" ? "default" : "outline"}
-              onClick={() => setMode("quote")}
-            >
-              Paste Jewelry Cost
-            </Button>
-            {mode === "costs" && (
-              <div className="ml-auto flex items-center gap-2">
-                <span className="text-xs text-muted-foreground">Default currency</span>
-                {(["USD", "INR"] as const).map((c) => (
-                  <Button
-                    key={c}
-                    type="button"
-                    size="sm"
-                    variant={currency === c ? "default" : "outline"}
-                    onClick={() => setCurrency(c)}
-                  >
-                    {c === "USD" ? "$" : "₹"}
-                  </Button>
-                ))}
-              </div>
-            )}
-          </div>
-          {mode === "costs" ? (
-            <Textarea
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              rows={7}
-              className="font-mono text-base"
-              placeholder={"Silver 25000\n14KT LGD 55686\nABC Ring $300\nPlatinum Moiss ₹23811"}
-            />
-          ) : (
-            <Textarea
-              value={quote}
-              onChange={(e) => setQuote(e.target.value)}
-              rows={10}
-              className="font-mono text-sm"
-              placeholder={"Paste the full quotation table here"}
-            />
-          )}
-          <div className="hidden md:flex flex-wrap gap-2">
-            <Button onClick={calculate} className="h-11 px-6">
+          <Textarea
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            rows={7}
+            className="font-mono text-base"
+            placeholder={"Silver 25000\n14KT LGD 55686\nABC Ring 300"}
+          />
+
+          <div className="flex flex-wrap items-end gap-3">
+            <Button onClick={calculate} className="h-11 px-6 hidden md:inline-flex">
               <CalcIcon className="h-4 w-4 mr-2" />
               Calculate
             </Button>
+
+            {/* Discount */}
+            <div className="flex flex-col gap-1">
+              <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                Discount
+              </Label>
+              <div className="flex items-center gap-2">
+                <select
+                  value={discountMode}
+                  onChange={(e) => setDiscountMode(e.target.value as typeof discountMode)}
+                  className={selectCls}
+                >
+                  <option value="none">No Discount</option>
+                  <option value="preset">Preset %</option>
+                  <option value="custom">Custom %</option>
+                </select>
+                {discountMode === "preset" && (
+                  <select
+                    value={discountPreset}
+                    onChange={(e) => setDiscountPreset(parseFloat(e.target.value))}
+                    className={selectCls}
+                  >
+                    {DISCOUNTS.filter((d) => d > 0).map((d) => (
+                      <option key={d} value={d}>
+                        {d}%
+                      </option>
+                    ))}
+                  </select>
+                )}
+                {discountMode === "custom" && (
+                  <Input
+                    type="number"
+                    value={discountCustom}
+                    onChange={(e) => setDiscountCustom(e.target.value)}
+                    placeholder="0"
+                    className="h-9 w-20 text-right"
+                  />
+                )}
+              </div>
+            </div>
+
+            {/* Target Net Profit Margin */}
+            <div className="flex flex-col gap-1">
+              <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                Target Net Profit Margin
+              </Label>
+              <div className="flex items-center gap-2">
+                <select
+                  value={marginMode}
+                  onChange={(e) => setMarginMode(e.target.value as typeof marginMode)}
+                  className={selectCls}
+                >
+                  <option value="none">Use Saved Target</option>
+                  <option value="preset">Preset %</option>
+                  <option value="custom">Custom</option>
+                </select>
+                {marginMode === "preset" && (
+                  <select
+                    value={marginPreset}
+                    onChange={(e) => setMarginPreset(parseFloat(e.target.value))}
+                    className={selectCls}
+                  >
+                    {MARGIN_PRESETS.map((p) => (
+                      <option key={p} value={p}>
+                        {p}%
+                      </option>
+                    ))}
+                  </select>
+                )}
+                {marginMode === "custom" && (
+                  <>
+                    <select
+                      value={marginKind}
+                      onChange={(e) => setMarginKind(e.target.value as typeof marginKind)}
+                      className={selectCls}
+                    >
+                      <option value="pct">%</option>
+                      <option value="amount">Amount</option>
+                    </select>
+                    {marginKind === "amount" && (
+                      <select
+                        value={marginCurrency}
+                        onChange={(e) =>
+                          setMarginCurrency(e.target.value as typeof marginCurrency)
+                        }
+                        className={selectCls}
+                      >
+                        <option value="USD">$</option>
+                        <option value="INR">₹</option>
+                      </select>
+                    )}
+                    <Input
+                      type="number"
+                      value={marginCustom}
+                      onChange={(e) => setMarginCustom(e.target.value)}
+                      placeholder="0"
+                      className="h-9 w-24 text-right"
+                    />
+                  </>
+                )}
+              </div>
+            </div>
+
             <Button
               variant="outline"
+              className="h-9 hidden md:inline-flex"
               onClick={() => {
                 setInput("");
-                setQuote("");
                 setRows([]);
               }}
             >
               Clear
             </Button>
           </div>
-          {mode === "costs" ? (
-            <p className="text-xs text-muted-foreground">
-              Write anything — name plus a number. Use ₹ or $ to force a currency, otherwise
-              the default above is used (₹{settings.usdInrRate}/$1).
-            </p>
-          ) : (
-            <p className="text-xs text-muted-foreground">
-              Extracts only 10KT, 14KT, 18KT, Silver and Platinum in LGD + Moissanite (24KT,
-              22KT and natural diamond ignored) and converts ₹ → $ at ₹{settings.usdInrRate}/$1.
-            </p>
-          )}
+
+          <p className="text-xs text-muted-foreground">
+            Write anything — a name plus a number per line. Use ₹ or $ to force a currency,
+            otherwise the selected one is used (₹{settings.usdInrRate}/$1). A full jewelry
+            quotation table can be pasted here too.
+          </p>
         </CardContent>
       </Card>
 
@@ -650,7 +771,7 @@ function CalculatorView({
           className="h-12"
           onClick={() => {
             setInput("");
-            setQuote("");
+            
             setRows([]);
           }}
         >
@@ -683,7 +804,7 @@ function DiscountSelect({
         value={preset ? String(row.discountPct) : "custom"}
         onChange={(e) => {
           const v = e.target.value;
-          if (v === "custom") update(row.id, { discountPct: row.discountPct || 25 });
+          if (v === "custom") update(row.id, { discountPct: row.discountPct || 0 });
           else update(row.id, { discountPct: parseFloat(v) });
         }}
         className="h-9 w-[76px] rounded-md border border-input bg-background px-2 text-sm"
@@ -848,7 +969,7 @@ function MobileResult({
   update: (id: string, patch: Partial<CalcRow>) => void;
   onSave: SaveFn;
 }) {
-  const { auto, selling, bd, original } = useRowCalc(row, settings);
+  const { base, marginAmount, auto, selling, bd, original, minApplied } = useRowCalc(row, settings);
 
   return (
     <Card className="shadow-soft border-border/60">
@@ -894,6 +1015,16 @@ function MobileResult({
         {row.expanded && (
           <div className="space-y-4 rounded-xl bg-secondary/30 p-4">
             <RowControls row={row} auto={auto} update={update} />
+            <PriceBuildup
+              minApplied={minApplied}
+              minNetProfit={settings.minNetProfit}
+              row={row}
+              base={base}
+              marginAmount={marginAmount}
+              selling={selling}
+              original={original}
+              bd={bd}
+            />
             <BreakdownGrid
               bd={bd}
               compareAt={original}
@@ -925,7 +1056,7 @@ function RowItem({
   update: (id: string, patch: Partial<CalcRow>) => void;
   onSave: SaveFn;
 }) {
-  const { auto, selling, bd, original } = useRowCalc(row, settings);
+  const { base, marginAmount, auto, selling, bd, original, minApplied } = useRowCalc(row, settings);
 
   return (
     <>
@@ -988,6 +1119,16 @@ function RowItem({
         <TableRow>
           <TableCell colSpan={9} className="bg-secondary/30 p-6 space-y-6">
             <RowControls row={row} auto={auto} update={update} />
+            <PriceBuildup
+              minApplied={minApplied}
+              minNetProfit={settings.minNetProfit}
+              row={row}
+              base={base}
+              marginAmount={marginAmount}
+              selling={selling}
+              original={original}
+              bd={bd}
+            />
             <BreakdownGrid
               bd={bd}
               compareAt={original}
@@ -999,6 +1140,78 @@ function RowItem({
         </TableRow>
       )}
     </>
+  );
+}
+
+function PriceBuildup({
+  row,
+  base,
+  marginAmount,
+  selling,
+  original,
+  bd,
+  minApplied,
+  minNetProfit,
+}: {
+  row: CalcRow;
+  base: number;
+  marginAmount: number;
+  selling: number;
+  original: number;
+  bd: ReturnType<typeof computeBreakdown>;
+  minApplied?: boolean;
+  minNetProfit?: number;
+}) {
+  const lines: [string, string][] = [
+    ["Cost", fmtDual(row.cost)],
+    [
+      `Base Required Selling Price (${
+        row.marginType === "pct" && row.marginPct
+          ? "saved target"
+          : "target"
+      })`,
+      fmtDual(base),
+    ],
+    [
+      row.marginType === "pct" && row.marginPct
+        ? `Adjustment for ${row.marginPct}% Target Net Profit Margin`
+        : "Added Margin",
+      marginAmount !== 0 ? `${marginAmount > 0 ? "+ " : "- "}${fmtDual(Math.abs(marginAmount))}` : "—",
+    ],
+    [
+      "Selling Price After Margin",
+      fmtDual(row.priceMode === "auto" ? base + marginAmount : selling),
+    ],
+    ["Discount", row.discountPct > 0 ? `${row.discountPct}%` : "No discount"],
+    ["Original Etsy / List Price", fmtDual(original)],
+    ["Final Customer Selling Price", fmtDual(selling)],
+    ["Net Profit", fmtDual(bd.netProfit)],
+    ["Net Profit Margin", `${bd.netProfitPct.toFixed(2)}%`],
+  ];
+  return (
+    <div>
+      <h4 className="text-xs uppercase tracking-wider text-muted-foreground mb-3 font-sans">
+        Price Build-up
+      </h4>
+      {minApplied && (
+        <div className="mb-2 inline-flex items-center rounded-full bg-primary/10 text-primary px-3 py-1 text-[11px] font-medium">
+          Minimum Profit Rule Applied — {fmtUsdOnly(minNetProfit ?? 0)}
+        </div>
+      )}
+      <dl className="rounded-xl bg-card border border-border p-4 space-y-1 text-sm">
+        {lines.map(([k, v], i) => (
+          <div
+            key={k}
+            className={`flex justify-between gap-4 py-1 ${
+              i >= lines.length - 2 ? "font-semibold text-primary" : ""
+            }`}
+          >
+            <dt className="text-muted-foreground">{k}</dt>
+            <dd className="tabular-nums whitespace-nowrap">{v}</dd>
+          </div>
+        ))}
+      </dl>
+    </div>
   );
 }
 
@@ -1035,6 +1248,8 @@ function BreakdownGrid({
     ["TDS Withheld", `− ${fmtDual(bd.tds)}`],
     ["TCS Withheld", `− ${fmtDual(bd.tcs)}`],
     ["Expected Etsy Cash Payout", fmtDual(bd.cashPayout), "total"],
+    [`Payoneer Fee (${settings.payoneerFee}%)`, `− ${fmtDual(bd.payoneerFee)}`],
+    ["Expected Bank Receipt", fmtDual(bd.bankReceipt), "total"],
     [`Etsy Ads Cost (${adsLabel ?? `${settings.adsSpend}%`})`, `− ${fmtDual(bd.adsSpend)}`],
     ["Shipping", `− ${fmtDual(bd.shipping)}`],
     ["Product Cost", `− ${fmtDual(bd.productCost)}`],
@@ -1156,6 +1371,12 @@ const FEE_FIELDS: { key: NumKey; label: string; suffix: string; hint?: string }[
   { key: "usdInrRate", label: "USD → INR Rate", suffix: "₹/$" },
   { key: "regulatoryFee", label: "Regulatory Operating Fee", suffix: "%" },
   { key: "sellerFeeGst", label: "GST on Seller Fees", suffix: "%" },
+  {
+    key: "payoneerFee",
+    label: "Payoneer Withdrawal / Conversion Fee",
+    suffix: "%",
+    hint: "Charged by Payoneer on the Etsy cash payout, not by Etsy",
+  },
 ];
 
 const TAX_FIELDS: { key: NumKey; label: string; suffix: string }[] = [
@@ -1168,6 +1389,7 @@ const COST_FIELDS: { key: NumKey; label: string; suffix: string }[] = [
   { key: "adsSpend", label: "Average Etsy Ads Cost", suffix: "%" },
   { key: "shipping", label: "Shipping Cost", suffix: "$" },
   { key: "targetNetProfit", label: "Target Net Profit", suffix: "%" },
+  { key: "minNetProfit", label: "Minimum Net Profit", suffix: "$" },
 ];
 
 function NumField({
