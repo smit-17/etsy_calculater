@@ -12,6 +12,7 @@ export interface PricingSettings {
   adsSpend: number; // average Etsy ads cost %
   offsiteAdsOn: boolean;
   offsiteAdsPct: number; // %
+  otherExpense: number; // % of profit before income tax spent on other business expenses
   incomeTax: number; // %
   targetNetProfit: number; // %
   minNetProfit: number; // $ minimum final net profit per order
@@ -34,6 +35,7 @@ export const DEFAULT_SETTINGS: PricingSettings = {
   adsSpend: 15,
   offsiteAdsOn: false,
   offsiteAdsPct: 15,
+  otherExpense: 0,
   incomeTax: 15,
   targetNetProfit: 10,
   minNetProfit: 50,
@@ -61,6 +63,8 @@ export interface Breakdown {
   shipping: number;
   productCost: number;
   profitBeforeTax: number;
+  otherExpense: number;
+  adjustedProfitBeforeTax: number;
   incomeTax: number;
   netProfit: number;
   netProfitPct: number;
@@ -78,6 +82,7 @@ interface Rates {
   payoneer: number;
   ads: number;
   offsite: number;
+  exp: number;
   it: number;
   target: number;
   fixedUsd: number;
@@ -101,6 +106,7 @@ function rates(s: PricingSettings, o?: CalcOptions): Rates {
     payoneer: (s.payoneerFee || 0) / 100,
     ads: adsPct / 100,
     offsite: s.offsiteAdsOn ? s.offsiteAdsPct / 100 : 0,
+    exp: (s.otherExpense || 0) / 100,
     it: s.incomeTax / 100,
     target: s.targetNetProfit / 100,
     fixedUsd: s.usdInrRate > 0 ? s.processingFeeFixedInr / s.usdInrRate : 0,
@@ -135,12 +141,13 @@ export function calculateSellingPrice(
   if (!(K > 0)) return NaN;
 
   // Rule 1: net profit = target% of selling price
-  const denom = K - r.target / (1 - r.it);
+  const keep = (1 - r.exp) * (1 - r.it);
+  const denom = K - r.target / keep;
   const byMargin = denom > 0 ? C / denom : NaN;
 
   // Rule 2: net profit >= minimum $ amount
   const minNet = s.minNetProfit > 0 ? s.minNetProfit : 0;
-  const byMin = minNet > 0 ? (minNet / (1 - r.it) + C) / K : NaN;
+  const byMin = minNet > 0 ? (minNet / keep + C) / K : NaN;
 
   const candidates = [byMargin, byMin].filter((n) => Number.isFinite(n) && n > 0);
   if (!candidates.length) return NaN;
@@ -160,7 +167,8 @@ export function isMinProfitDriven(
     A - r.ads - (r.final ? r.tds + r.tcs : 0) - r.payoneer * (A - r.tds - r.tcs);
   const C = B * (1 - r.payoneer) + s.shipping + cost;
   if (!(K > 0)) return false;
-  const denom = K - r.target / (1 - r.it);
+  const keep = (1 - r.exp) * (1 - r.it);
+  const denom = K - r.target / keep;
   const byMargin = denom > 0 ? C / denom : 0;
   const minNet = s.minNetProfit > 0 ? s.minNetProfit : 0;
   const byMin = minNet > 0 ? (minNet / (1 - r.it) + C) / K : 0;
@@ -192,8 +200,10 @@ export function computeBreakdown(
   const Ads = S * r.ads;
   const profitBefore =
     revenueAfterFees - Ads - s.shipping - cost - payoneer - (r.final ? withheld : 0);
-  const tax = profitBefore > 0 ? profitBefore * r.it : 0;
-  const net = profitBefore - tax;
+  const otherExpense = profitBefore > 0 ? profitBefore * r.exp : 0;
+  const adjustedProfit = profitBefore - otherExpense;
+  const tax = adjustedProfit > 0 ? adjustedProfit * r.it : 0;
+  const net = adjustedProfit - tax;
   const buyerTax = s.buyerTaxOn ? S * (s.buyerTaxPct / 100) : 0;
   return {
     sellingPrice: S,
@@ -214,6 +224,8 @@ export function computeBreakdown(
     shipping: s.shipping,
     productCost: cost,
     profitBeforeTax: profitBefore,
+    otherExpense,
+    adjustedProfitBeforeTax: adjustedProfit,
     incomeTax: tax,
     netProfit: net,
     netProfitPct: S > 0 ? (net / S) * 100 : 0,

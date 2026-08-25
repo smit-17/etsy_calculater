@@ -140,8 +140,11 @@ export function SalesPriceCheckView({ settings }: { settings: PricingSettings })
       cost -
       payoneer -
       (settings.tdsTcsFinalCost ? tds + tcs : 0);
-    const tax = profitBefore > 0 ? profitBefore * (settings.incomeTax / 100) : 0;
-    const net = profitBefore - tax;
+    const otherExpense =
+      profitBefore > 0 ? profitBefore * ((settings.otherExpense || 0) / 100) : 0;
+    const adjustedProfit = profitBefore - otherExpense;
+    const tax = adjustedProfit > 0 ? adjustedProfit * (settings.incomeTax / 100) : 0;
+    const net = adjustedProfit - tax;
     const margin = S > 0 ? (net / S) * 100 : 0;
     const original = S + discountAmt;
     const totalFees = tf + pf + reg + gst + offsite;
@@ -168,6 +171,8 @@ export function SalesPriceCheckView({ settings }: { settings: PricingSettings })
       ads,
       adsPct,
       profitBefore,
+      otherExpense,
+      adjustedProfit,
       tax,
       net,
       margin,
@@ -217,6 +222,19 @@ export function SalesPriceCheckView({ settings }: { settings: PricingSettings })
             ] as [string, string][])
           : []),
         ["Profit Before Income Tax", fmtDual(result.profitBefore), true],
+        ...((settings.otherExpense || 0) > 0
+          ? ([
+              [
+                `Other Business Expense (${settings.otherExpense}%)`,
+                `− ${fmtDual(result.otherExpense)}`,
+              ],
+              [
+                "Adjusted Profit Before Income Tax",
+                fmtDual(result.adjustedProfit),
+                true,
+              ],
+            ] as [string, string, boolean?][])
+          : []),
         [`Income Tax (${settings.incomeTax}%)`, `− ${fmtDual(result.tax)}`],
         ["Final Net Profit", fmtDual(result.net), true],
       ]

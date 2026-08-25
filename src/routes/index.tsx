@@ -474,6 +474,15 @@ function CalculatorView({
   const [marginCustom, setMarginCustom] = useState("");
   const [marginCurrency, setMarginCurrency] = useState<"USD" | "INR">("USD");
 
+  const [adsMode, setAdsMode] = useState<"on" | "off" | "manual">("on");
+  const [adsManual, setAdsManual] = useState("");
+  const adsCfg = useMemo(() => {
+    if (adsMode === "off") return { adsOn: false, adsPct: 0 };
+    if (adsMode === "manual")
+      return { adsOn: true, adsPct: parseFloat(adsManual) || 0 };
+    return { adsOn: true, adsPct: settings.adsSpend };
+  }, [adsMode, adsManual, settings.adsSpend]);
+
   const discountPct =
     discountMode === "none"
       ? 0
@@ -506,8 +515,7 @@ function CalculatorView({
         skuAuto: sku,
         skuManual: false,
         discountPct,
-        adsOn: true,
-        adsPct: settings.adsSpend,
+        ...adsCfg,
         ...marginCfg,
         expanded: false,
       };
@@ -763,6 +771,33 @@ function CalculatorView({
                       className="h-9 w-24 text-right"
                     />
                   </>
+                )}
+              </div>
+            </div>
+
+            {/* Ads Calculation */}
+            <div className="flex flex-col gap-1">
+              <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                Ads Calculation
+              </Label>
+              <div className="flex items-center gap-2">
+                <select
+                  value={adsMode}
+                  onChange={(e) => setAdsMode(e.target.value as typeof adsMode)}
+                  className={selectCls}
+                >
+                  <option value="on">Ads ON ({settings.adsSpend}%)</option>
+                  <option value="off">Ads OFF</option>
+                  <option value="manual">Manual %</option>
+                </select>
+                {adsMode === "manual" && (
+                  <Input
+                    type="number"
+                    value={adsManual}
+                    onChange={(e) => setAdsManual(e.target.value)}
+                    placeholder="0"
+                    className="h-9 w-20 text-right"
+                  />
                 )}
               </div>
             </div>
@@ -1347,7 +1382,56 @@ function PriceBuildup({
   );
 }
 
+function CostProfitSummary({ bd }: { bd: ReturnType<typeof computeBreakdown> }) {
+  const S = bd.sellingPrice;
+  const cost = bd.productCost;
+  const net = bd.netProfit;
+  const expense = bd.otherExpense;
+  const tax = bd.incomeTax;
+  // everything except product cost, expense, income tax and net profit
+  const other = S - cost - expense - tax - net;
+  const pct = (n: number) => (S > 0 ? `${((n / S) * 100).toFixed(2)}%` : "—");
+
+  const rows: { label: string; value: number; p: string; cls: string }[] = [
+    { label: "Selling Price", value: S, p: "100%", cls: "font-semibold text-foreground" },
+    { label: "Product Cost", value: cost, p: pct(cost), cls: "text-foreground" },
+    { label: "Etsy & Other Charges", value: other, p: pct(other), cls: "text-destructive" },
+    { label: "Expense", value: expense, p: pct(expense), cls: "text-destructive" },
+    { label: "Income Tax", value: tax, p: pct(tax), cls: "text-muted-foreground" },
+    { label: "Final Net Profit", value: net, p: pct(net), cls: "font-semibold text-success" },
+  ];
+
+
+  return (
+    <div>
+      <h4 className="text-xs uppercase tracking-wider text-muted-foreground mb-3 font-sans">
+        Cost &amp; Profit Summary
+      </h4>
+      <div className="rounded-xl bg-card border border-border p-5">
+        <div className="grid grid-cols-[minmax(0,1fr)_auto_auto] gap-x-4 text-[10px] uppercase tracking-wider text-muted-foreground pb-2">
+          <span>Category</span>
+          <span className="text-right">Amount</span>
+          <span className="text-right">% of Price</span>
+        </div>
+        {rows.map((r) => (
+          <div
+            key={r.label}
+            className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-x-4 border-t border-border py-2.5 text-sm"
+          >
+            <span className={r.cls}>{r.label}</span>
+            <span className={`text-right tabular-nums whitespace-nowrap ${r.cls}`}>
+              {fmtDual(r.value)}
+            </span>
+            <span className={`text-right tabular-nums ${r.cls}`}>{r.p}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function BreakdownGrid({
+
   bd,
   compareAt,
   discountPct,
@@ -1389,7 +1473,16 @@ function BreakdownGrid({
       ? ([["TDS + TCS (final cost)", `− ${fmtDual(bd.withheldTotal)}`]] as [string, string][])
       : []),
     ["Profit Before Income Tax", fmtDual(bd.profitBeforeTax)],
-    ["Income Tax", `− ${fmtDual(bd.incomeTax)}`],
+    ...(settings.otherExpense > 0
+      ? ([
+          [
+            `Other Business Expense (${settings.otherExpense}%)`,
+            `− ${fmtDual(bd.otherExpense)}`,
+          ],
+          ["Adjusted Profit Before Income Tax", fmtDual(bd.adjustedProfitBeforeTax)],
+        ] as [string, string][])
+      : []),
+    [`Income Tax (${settings.incomeTax}%)`, `− ${fmtDual(bd.incomeTax)}`],
     ["Final Net Profit", fmtDual(bd.netProfit), "total"],
   ];
 
@@ -1420,7 +1513,9 @@ function BreakdownGrid({
         </dl>
       </div>
       <div className="space-y-4">
+        <CostProfitSummary bd={bd} />
         <div>
+
           <h4 className="text-xs uppercase tracking-wider text-muted-foreground mb-3 font-sans">
             Discount Calculator
           </h4>
@@ -1514,6 +1609,7 @@ const FEE_FIELDS: { key: NumKey; label: string; suffix: string; hint?: string }[
 const TAX_FIELDS: { key: NumKey; label: string; suffix: string }[] = [
   { key: "tds", label: "TDS Withheld", suffix: "%" },
   { key: "tcs", label: "TCS Withheld", suffix: "%" },
+  { key: "otherExpense", label: "Other Business Expense", suffix: "%" },
   { key: "incomeTax", label: "Income Tax on Profit", suffix: "%" },
 ];
 
