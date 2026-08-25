@@ -15,6 +15,7 @@ export interface PricingSettings {
   otherExpense: number; // % of profit before income tax spent on other business expenses
   incomeTax: number; // %
   targetNetProfit: number; // %
+  defaultDiscount: number; // % default discount used by the calculator
   minNetProfit: number; // $ minimum final net profit per order
   shipping: number; // $
   buyerTaxOn: boolean;
@@ -38,6 +39,7 @@ export const DEFAULT_SETTINGS: PricingSettings = {
   otherExpense: 0,
   incomeTax: 15,
   targetNetProfit: 10,
+  defaultDiscount: 40,
   minNetProfit: 50,
   shipping: 60,
   buyerTaxOn: false,

@@ -463,19 +463,53 @@ function CalculatorView({
   const [rows, setRows] = useState<CalcRow[]>([]);
   const [mainSku, setMainSku] = useState("");
 
-  // Global pre-calculate options — default 40% discount, 10% target margin
+  // Global pre-calculate options — defaults always come from saved Pricing Logic
   const [discountMode, setDiscountMode] = useState<"none" | "preset" | "custom">("preset");
-  const [discountPreset, setDiscountPreset] = useState(40);
+  const [discountPreset, setDiscountPreset] = useState(settings.defaultDiscount);
   const [discountCustom, setDiscountCustom] = useState("");
 
   const [marginMode, setMarginMode] = useState<"none" | "preset" | "custom">("preset");
-  const [marginPreset, setMarginPreset] = useState(10);
+  const [marginPreset, setMarginPreset] = useState(settings.targetNetProfit);
   const [marginKind, setMarginKind] = useState<"pct" | "amount">("pct");
   const [marginCustom, setMarginCustom] = useState("");
   const [marginCurrency, setMarginCurrency] = useState<"USD" | "INR">("USD");
 
   const [adsMode, setAdsMode] = useState<"on" | "off" | "manual">("on");
   const [adsManual, setAdsManual] = useState("");
+
+  const discountOptions = useMemo(
+    () =>
+      Array.from(
+        new Set([...DISCOUNTS.filter((d) => d > 0), settings.defaultDiscount].filter((d) => d > 0))
+      ).sort((a, b) => a - b),
+    [settings.defaultDiscount]
+  );
+  const marginOptions = useMemo(
+    () =>
+      Array.from(new Set([...MARGIN_PRESETS, settings.targetNetProfit].filter((d) => d > 0))).sort(
+        (a, b) => a - b
+      ),
+    [settings.targetNetProfit]
+  );
+
+  // Reload the saved Pricing Logic values whenever they change (Save Logic)
+  function resetControls() {
+    setDiscountMode("preset");
+    setDiscountPreset(settings.defaultDiscount);
+    setDiscountCustom("");
+    setMarginMode("preset");
+    setMarginPreset(settings.targetNetProfit);
+    setMarginKind("pct");
+    setMarginCustom("");
+    setMarginCurrency("USD");
+    setAdsMode("on");
+    setAdsManual("");
+  }
+  useEffect(() => {
+    resetControls();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings.defaultDiscount, settings.targetNetProfit, settings.adsSpend]);
+
   const adsCfg = useMemo(() => {
     if (adsMode === "off") return { adsOn: false, adsPct: 0 };
     if (adsMode === "manual")
@@ -694,7 +728,7 @@ function CalculatorView({
                     onChange={(e) => setDiscountPreset(parseFloat(e.target.value))}
                     className={selectCls}
                   >
-                    {DISCOUNTS.filter((d) => d > 0).map((d) => (
+                    {discountOptions.map((d) => (
                       <option key={d} value={d}>
                         {d}%
                       </option>
@@ -734,7 +768,7 @@ function CalculatorView({
                     onChange={(e) => setMarginPreset(parseFloat(e.target.value))}
                     className={selectCls}
                   >
-                    {MARGIN_PRESETS.map((p) => (
+                    {marginOptions.map((p) => (
                       <option key={p} value={p}>
                         {p}%
                       </option>
@@ -808,6 +842,7 @@ function CalculatorView({
               onClick={() => {
                 setInput("");
                 setRows([]);
+                resetControls();
               }}
             >
               Clear
@@ -924,8 +959,8 @@ function CalculatorView({
           className="h-12"
           onClick={() => {
             setInput("");
-            
             setRows([]);
+            resetControls();
           }}
         >
           Clear
@@ -1617,6 +1652,7 @@ const COST_FIELDS: { key: NumKey; label: string; suffix: string }[] = [
   { key: "adsSpend", label: "Average Etsy Ads Cost", suffix: "%" },
   { key: "shipping", label: "Shipping Cost", suffix: "$" },
   { key: "targetNetProfit", label: "Target Net Profit", suffix: "%" },
+  { key: "defaultDiscount", label: "Default Discount", suffix: "%" },
   { key: "minNetProfit", label: "Minimum Net Profit", suffix: "$" },
 ];
 
