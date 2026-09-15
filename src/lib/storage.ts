@@ -1,10 +1,10 @@
+import { supabase } from "@/integrations/supabase/client";
 import { DEFAULT_SETTINGS, type PricingSettings } from "./pricing";
 
-const K_SETTINGS = "lepdo.settings.v1";
-const K_SAVED = "lepdo.saved.v1";
 const K_AUTH = "lepdo.auth.v1";
 const K_CALC_COUNT = "lepdo.calcCount.v1";
 const K_CALC_LOG = "lepdo.calcLog.v1"; // ISO dates of each calculation
+const SETTINGS_ID = "global";
 
 export interface SavedPrice {
   id: string;
@@ -19,43 +19,170 @@ export interface SavedPrice {
   netMargin?: number;
 }
 
-export function loadSettings(): PricingSettings {
-  if (typeof window === "undefined") return DEFAULT_SETTINGS;
-  try {
-    const raw = localStorage.getItem(K_SETTINGS);
-    if (!raw) return DEFAULT_SETTINGS;
-    return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
-  } catch {
-    return DEFAULT_SETTINGS;
-  }
-}
-export function saveSettings(s: PricingSettings) {
-  localStorage.setItem(K_SETTINGS, JSON.stringify(s));
+/* ---------------- in-memory cache (kept in sync with the cloud DB) --------- */
+
+let settingsCache: PricingSettings = DEFAULT_SETTINGS;
+let savedCache: SavedPrice[] = [];
+let initialized = false;
+const listeners = new Set<() => void>();
+
+function notify() {
+  for (const l of listeners) l();
 }
 
-export function loadSaved(): SavedPrice[] {
-  if (typeof window === "undefined") return [];
-  try {
-    return JSON.parse(localStorage.getItem(K_SAVED) || "[]");
-  } catch {
-    return [];
+export function subscribeStorage(cb: () => void): () => void {
+  listeners.add(cb);
+  return () => listeners.delete(cb);
+}
+
+type Row = {
+  id: string;
+  date: string;
+  sku: string | null;
+  product_name: string | null;
+  cost: number | string | null;
+  selling_price: number | string | null;
+  original_price: number | string | null;
+  discount_pct: number | string | null;
+  net_profit: number | string | null;
+  net_margin: number | string | null;
+};
+
+const num = (v: unknown) => (v === null || v === undefined ? 0 : Number(v));
+
+function toSaved(r: Row): SavedPrice {
+  return {
+    id: r.id,
+    date: r.date,
+    sku: r.sku ?? "",
+    productName: r.product_name ?? "",
+    cost: num(r.cost),
+    sellingPrice: num(r.selling_price),
+    originalPrice: num(r.original_price),
+    discountPct: num(r.discount_pct),
+    netProfit: num(r.net_profit),
+    netMargin: r.net_margin === null || r.net_margin === undefined ? undefined : Number(r.net_margin),
+  };
+}
+
+interface SavedRowPatch {
+  date?: string;
+  sku?: string;
+  product_name?: string;
+  cost?: number;
+  selling_price?: number;
+  original_price?: number;
+  discount_pct?: number;
+  net_profit?: number;
+  net_margin?: number;
+}
+
+function toRow(p: Partial<SavedPrice>): SavedRowPatch {
+  const out: SavedRowPatch = {};
+  if (p.date !== undefined) out.date = p.date;
+  if (p.sku !== undefined) out.sku = p.sku;
+  if (p.productName !== undefined) out.product_name = p.productName;
+  if (p.cost !== undefined) out.cost = p.cost;
+  if (p.sellingPrice !== undefined) out.selling_price = p.sellingPrice;
+  if (p.originalPrice !== undefined) out.original_price = p.originalPrice;
+  if (p.discountPct !== undefined) out.discount_pct = p.discountPct;
+  if (p.netProfit !== undefined) out.net_profit = p.netProfit;
+  if (p.netMargin !== undefined) out.net_margin = p.netMargin;
+  return out;
+}
+
+async function fetchSettings() {
+  const { data } = await supabase
+    .from("app_settings")
+    .select("data")
+    .eq("id", SETTINGS_ID)
+    .maybeSingle();
+  const raw = (data?.data ?? {}) as Partial<PricingSettings>;
+  settingsCache = { ...DEFAULT_SETTINGS, ...raw };
+}
+
+async function fetchSaved() {
+  const { data } = await supabase
+    .from("saved_prices")
+    .select("*")
+    .order("date", { ascending: false });
+  savedCache = ((data ?? []) as Row[]).map(toSaved);
+}
+
+/** Load everything from the cloud and keep it live-synced across users. */
+export async function initStorage(): Promise<void> {
+  if (initialized) {
+    await Promise.all([fetchSettings(), fetchSaved()]);
+    notify();
+    return;
   }
+  initialized = true;
+  await Promise.all([fetchSettings(), fetchSaved()]);
+  notify();
+
+  supabase
+    .channel("lepdo-sync")
+    .on("postgres_changes", { event: "*", schema: "public", table: "saved_prices" }, () => {
+      void fetchSaved().then(notify);
+    })
+    .on("postgres_changes", { event: "*", schema: "public", table: "app_settings" }, () => {
+      void fetchSettings().then(notify);
+    })
+    .subscribe();
 }
-export function writeSaved(list: SavedPrice[]) {
-  localStorage.setItem(K_SAVED, JSON.stringify(list));
+
+/* ---------------- settings ---------------- */
+
+export function loadSettings(): PricingSettings {
+  return settingsCache;
 }
+
+export function saveSettings(s: PricingSettings) {
+  settingsCache = s;
+  notify();
+  void supabase
+    .from("app_settings")
+    .upsert({ id: SETTINGS_ID, data: JSON.parse(JSON.stringify(s)), updated_at: new Date().toISOString() });
+}
+
+/* ---------------- saved prices ---------------- */
+
+export function loadSaved(): SavedPrice[] {
+  return savedCache;
+}
+
 export function addSaved(p: SavedPrice) {
-  const list = loadSaved();
-  list.unshift(p);
-  writeSaved(list);
+  const id =
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random()}`;
+  const row: SavedPrice = { ...p, id, date: p.date || new Date().toISOString() };
+  savedCache = [row, ...savedCache];
+  notify();
+  void supabase
+    .from("saved_prices")
+    .insert({ id, ...toRow(row) })
+    .then(() => void fetchSaved().then(notify));
 }
+
 export function updateSaved(id: string, patch: Partial<SavedPrice>) {
-  const list = loadSaved().map((r) => (r.id === id ? { ...r, ...patch } : r));
-  writeSaved(list);
+  savedCache = savedCache.map((r) => (r.id === id ? { ...r, ...patch } : r));
+  notify();
+  void supabase.from("saved_prices").update(toRow(patch)).eq("id", id);
 }
+
 export function deleteSaved(id: string) {
-  writeSaved(loadSaved().filter((r) => r.id !== id));
+  savedCache = savedCache.filter((r) => r.id !== id);
+  notify();
+  void supabase.from("saved_prices").delete().eq("id", id);
 }
+
+export function writeSaved(list: SavedPrice[]) {
+  savedCache = list;
+  notify();
+}
+
+/* ---------------- local-only session / counters ---------------- */
 
 export function isAuthed(): boolean {
   if (typeof window === "undefined") return false;

@@ -58,6 +58,8 @@ import {
   isAuthed,
   setAuthed,
   bumpCalcCount,
+  initStorage,
+  subscribeStorage,
   type SavedPrice,
 } from "@/lib/storage";
 
@@ -167,9 +169,18 @@ function App() {
 
   useEffect(() => {
     setAuthedState(isAuthed());
-    setSettings(loadSettings());
-    setSaved(loadSaved());
-    setReady(true);
+    const sync = () => {
+      setSettings(loadSettings());
+      setSaved(loadSaved());
+    };
+    const unsub = subscribeStorage(sync);
+    void initStorage()
+      .catch(() => undefined)
+      .finally(() => {
+        sync();
+        setReady(true);
+      });
+    return unsub;
   }, []);
 
   useEffect(() => {
