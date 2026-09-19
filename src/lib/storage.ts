@@ -101,12 +101,23 @@ async function fetchSettings() {
   settingsCache = { ...DEFAULT_SETTINGS, ...raw };
 }
 
+/** Fetch ALL saved rows. The API caps a single request at 1000 rows, so page through. */
 async function fetchSaved() {
-  const { data } = await supabase
-    .from("saved_prices")
-    .select("*")
-    .order("date", { ascending: false });
-  savedCache = ((data ?? []) as Row[]).map(toSaved);
+  const PAGE = 1000;
+  const all: Row[] = [];
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await supabase
+      .from("saved_prices")
+      .select("*")
+      .order("date", { ascending: false })
+      .order("id", { ascending: true })
+      .range(from, from + PAGE - 1);
+    if (error) break;
+    const chunk = (data ?? []) as Row[];
+    all.push(...chunk);
+    if (chunk.length < PAGE) break;
+  }
+  savedCache = all.map(toSaved);
 }
 
 /** Load everything from the cloud and keep it live-synced across users. */
@@ -175,6 +186,26 @@ export function deleteSaved(id: string) {
   savedCache = savedCache.filter((r) => r.id !== id);
   notify();
   void supabase.from("saved_prices").delete().eq("id", id);
+}
+
+/**
+ * Delete a whole Main SKU group. Removes the known rows by id AND any row in the
+ * database whose SKU belongs to the same Main SKU, so nothing can survive a delete.
+ */
+export async function deleteSavedGroup(base: string, ids: string[]) {
+  const idSet = new Set(ids);
+  const prefix = base.trim();
+  savedCache = savedCache.filter(
+    (r) => !idSet.has(r.id) && !(prefix && (r.sku === prefix || r.sku.startsWith(`${prefix}-`)))
+  );
+  notify();
+  if (ids.length) await supabase.from("saved_prices").delete().in("id", ids);
+  if (prefix) {
+    await supabase.from("saved_prices").delete().eq("sku", prefix);
+    await supabase.from("saved_prices").delete().like("sku", `${prefix}-%`);
+  }
+  await fetchSaved();
+  notify();
 }
 
 export function writeSaved(list: SavedPrice[]) {
