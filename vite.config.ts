@@ -6,7 +6,26 @@
 // You can pass additional config via defineConfig({ vite: { ... }, etc... }) if needed.
 import { defineConfig } from "@lovable.dev/vite-tanstack-config";
 
+// When building on Vercel (VERCEL=1 is set automatically there), pin the Vercel
+// deploy target. Inside Lovable builds this override is ignored.
+const isVercelBuild =
+  !!process.env["VERCEL"] ||
+  !!process.env["VERCEL_ENV"] ||
+  process.env["NITRO_PRESET"] === "vercel";
+
 export default defineConfig({
+  ...(isVercelBuild ? { nitro: { preset: "vercel" } } : {}),
+  vite: {
+    environments: {
+      ssr: {
+        build: {
+          rollupOptions: {
+            output: { inlineDynamicImports: true },
+          },
+        },
+      },
+    },
+  },
   tanstackStart: {
     // Redirect TanStack Start's bundled server entry to src/server.ts (our SSR error wrapper).
     // nitro/vite builds from this
