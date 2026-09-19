@@ -162,18 +162,39 @@ export function loadSaved(): SavedPrice[] {
   return savedCache;
 }
 
-export function addSaved(p: SavedPrice) {
-  const id =
+export async function addSaved(p: SavedPrice): Promise<void> {
+  const normalizedSku = p.sku.trim();
+  const matchingRows = normalizedSku
+    ? savedCache.filter((r) => r.sku.trim().toUpperCase() === normalizedSku.toUpperCase())
+    : [];
+  const existing = matchingRows[0];
+  const id = existing?.id ?? (
     typeof crypto !== "undefined" && "randomUUID" in crypto
       ? crypto.randomUUID()
-      : `${Date.now()}-${Math.random()}`;
+      : `${Date.now()}-${Math.random()}`
+  );
   const row: SavedPrice = { ...p, id, date: p.date || new Date().toISOString() };
-  savedCache = [row, ...savedCache];
+  const matchingIds = new Set(matchingRows.map((match) => match.id));
+  savedCache = [row, ...savedCache.filter((saved) => !matchingIds.has(saved.id))];
   notify();
-  void supabase
-    .from("saved_prices")
-    .insert({ id, ...toRow(row) })
-    .then(() => void fetchSaved().then(notify));
+
+  if (matchingRows.length > 1) {
+    const duplicateIds = matchingRows.slice(1).map((match) => match.id);
+    const { error: duplicateError } = await supabase.from("saved_prices").delete().in("id", duplicateIds);
+    if (duplicateError) throw duplicateError;
+  }
+
+  const payload = { id, ...toRow(row) };
+  const result = existing
+    ? await supabase.from("saved_prices").update(toRow(row)).eq("id", id)
+    : await supabase.from("saved_prices").insert(payload);
+  if (result.error) {
+    await fetchSaved();
+    notify();
+    throw result.error;
+  }
+  await fetchSaved();
+  notify();
 }
 
 export function updateSaved(id: string, patch: Partial<SavedPrice>) {
@@ -199,10 +220,23 @@ export async function deleteSavedGroup(base: string, ids: string[]) {
     (r) => !idSet.has(r.id) && !(prefix && (r.sku === prefix || r.sku.startsWith(`${prefix}-`)))
   );
   notify();
-  if (ids.length) await supabase.from("saved_prices").delete().in("id", ids);
+  if (ids.length) {
+    const { error } = await supabase.from("saved_prices").delete().in("id", ids);
+    if (error) {
+      await fetchSaved();
+      notify();
+      throw error;
+    }
+  }
   if (prefix) {
-    await supabase.from("saved_prices").delete().eq("sku", prefix);
-    await supabase.from("saved_prices").delete().like("sku", `${prefix}-%`);
+    const { error: exactError } = await supabase.from("saved_prices").delete().eq("sku", prefix);
+    if (exactError) throw exactError;
+    const escapedPrefix = prefix.replace(/([%_\\])/g, "\\$1");
+    const { error: prefixError } = await supabase
+      .from("saved_prices")
+      .delete()
+      .like("sku", `${escapedPrefix}-%`);
+    if (prefixError) throw prefixError;
   }
   await fetchSaved();
   notify();

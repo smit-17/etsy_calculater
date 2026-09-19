@@ -54,6 +54,7 @@ import {
   loadSaved,
   addSaved,
   deleteSaved,
+  deleteSavedGroup,
   updateSaved,
   isAuthed,
   setAuthed,
@@ -317,7 +318,7 @@ function SidebarContent({
     <>
       <div className="p-6 flex items-center gap-3 border-b border-sidebar-border/50">
         <img
-          src={lifestylelogo}
+          src={logo.url}
           alt="LEPDO"
           className="h-11 w-11 rounded-xl object-cover shadow-soft"
         />
@@ -641,30 +642,10 @@ function CalculatorView({
     toast.success(`Generated SKUs for ${rows.length} item${rows.length > 1 ? "s" : ""}.`);
   }
 
-  function saveRow(r: CalcRow, selling: number, original: number, netProfit: number, margin: number) {
-    addSaved({
-      id: `${Date.now()}-${r.id}`,
-      date: new Date().toISOString(),
-      sku: r.sku.trim(),
-      productName: r.name,
-      cost: r.cost,
-      sellingPrice: selling,
-      originalPrice: original,
-      discountPct: r.discountPct,
-      netProfit,
-      netMargin: margin,
-    });
-    onSaved();
-    toast.success(r.sku.trim() ? `Saved ${r.sku.trim()}` : `Saved ${r.name}`);
-  }
-
-  function saveAll() {
-    if (!rows.length) return;
-    const stamp = Date.now();
-    rows.forEach((r, i) => {
-      const { selling, original, bd } = calcRow(r, settings);
-      addSaved({
-        id: `${stamp}-${r.id}-${i}`,
+  async function saveRow(r: CalcRow, selling: number, original: number, netProfit: number, margin: number) {
+    try {
+      await addSaved({
+        id: `${Date.now()}-${r.id}`,
         date: new Date().toISOString(),
         sku: r.sku.trim(),
         productName: r.name,
@@ -672,12 +653,40 @@ function CalculatorView({
         sellingPrice: selling,
         originalPrice: original,
         discountPct: r.discountPct,
-        netProfit: bd.netProfit,
-        netMargin: bd.netProfitPct,
+        netProfit,
+        netMargin: margin,
       });
-    });
-    onSaved();
-    toast.success(`Saved all ${rows.length} item${rows.length > 1 ? "s" : ""}.`);
+      onSaved();
+      toast.success(r.sku.trim() ? `Saved ${r.sku.trim()}` : `Saved ${r.name}`);
+    } catch {
+      toast.error("Could not save this SKU. Please try again.");
+    }
+  }
+
+  async function saveAll() {
+    if (!rows.length) return;
+    const stamp = Date.now();
+    try {
+      await Promise.all(rows.map(async (r, i) => {
+        const { selling, original, bd } = calcRow(r, settings);
+        await addSaved({
+          id: `${stamp}-${r.id}-${i}`,
+          date: new Date().toISOString(),
+          sku: r.sku.trim(),
+          productName: r.name,
+          cost: r.cost,
+          sellingPrice: selling,
+          originalPrice: original,
+          discountPct: r.discountPct,
+          netProfit: bd.netProfit,
+          netMargin: bd.netProfitPct,
+        });
+      }));
+      onSaved();
+      toast.success(`Saved all ${rows.length} item${rows.length > 1 ? "s" : ""}.`);
+    } catch {
+      toast.error("Some SKUs could not be saved. Please try again.");
+    }
   }
 
   const selectCls =
@@ -2170,12 +2179,17 @@ function SavedGroupCard({
     else toast.error(`Recalculated ${ok}/${rows.length} — some targets unreachable.`);
   }
 
-  function deleteGroup() {
+  async function deleteGroup() {
     if (!confirm(`Delete group "${base}" with ${rows.length} variant${rows.length === 1 ? "" : "s"}? This cannot be undone.`))
       return;
-    for (const r of rows) deleteSaved(r.id);
-    refresh();
-    toast.success(`Deleted group ${base}`);
+    try {
+      await deleteSavedGroup(base, rows.map((r) => r.id));
+      refresh();
+      toast.success(`Deleted group ${base}`);
+    } catch {
+      refresh();
+      toast.error(`Could not fully delete ${base}. Please try again.`);
+    }
   }
 
   return (
@@ -2281,7 +2295,7 @@ function useVariantActions(row: SavedPrice, refresh: () => void, settings: Prici
     toast.success(`${label} copied`);
   }
   function duplicate() {
-    addSaved({ ...row, id: `${Date.now()}`, date: new Date().toISOString() });
+    void addSaved({ ...row, id: `${Date.now()}`, date: new Date().toISOString() });
     refresh();
     toast.success("Duplicated");
   }
