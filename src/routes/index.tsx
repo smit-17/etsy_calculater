@@ -318,7 +318,7 @@ function SidebarContent({
     <>
       <div className="p-6 flex items-center gap-3 border-b border-sidebar-border/50">
         <img
-          src={logo.url}
+          src={lifestylelogo}
           alt="LEPDO"
           className="h-11 w-11 rounded-xl object-cover shadow-soft"
         />

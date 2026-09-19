@@ -14,7 +14,13 @@ const isVercelBuild =
   process.env["NITRO_PRESET"] === "vercel";
 
 export default defineConfig({
-  ...(isVercelBuild ? { nitro: { preset: "vercel" } } : {}),
+  ...(isVercelBuild
+    ? {
+        nitro: {
+          preset: "vercel",
+        },
+      }
+    : {}),
   vite: {
     environments: {
       ssr: {
@@ -27,8 +33,7 @@ export default defineConfig({
     },
   },
   tanstackStart: {
-    // Redirect TanStack Start's bundled server entry to src/server.ts (our SSR error wrapper).
-    // nitro/vite builds from this
+    // Use the startup wrapper so production failures reach Vercel's Runtime Logs.
     server: { entry: "server" },
   },
 });
